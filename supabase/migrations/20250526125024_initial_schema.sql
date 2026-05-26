@@ -4,7 +4,7 @@
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
--- 1. Enable pgvector extension
+-- 1. Enable extensions
 -- ---------------------------------------------------------------------------
 CREATE EXTENSION IF NOT EXISTS vector;
 
@@ -465,18 +465,3 @@ INSERT INTO transcript_chunks (course_id, lesson_id, course_name, lesson_name, c
   'Para definir metas financeiras eficazes, utilize o critério SMART: Específicas (o que exatamente você quer?), Mensuráveis (qual o valor?), Atingíveis (é realista dado seu orçamento?), Relevantes (por que é importante?) e Temporais (em quanto tempo?). Metas bem definidas aumentam significativamente a probabilidade de sucesso no planejamento financeiro.',
   array_fill(0, ARRAY[768])::vector
 );
-
--- =============================================================================
--- End of migration
--- =============================================================================
--- Next steps:
---   1. Run the indexer (indexer.py) to replace placeholder embeddings with
---      real Gemini text-embedding-004 vectors from CEFIS transcripts.
---   2. Verify the extension and tables were created:
---        SELECT * FROM transcript_chunks LIMIT 5;
---        SELECT * FROM generated_content_chunks LIMIT 1;
---   3. Test an RPC call (replace the zeros with a real embedding in production):
---        SELECT * FROM match_chunks_global(
---          array_fill(0, ARRAY[768])::vector, 0.0, 5
---        );
--- =============================================================================
