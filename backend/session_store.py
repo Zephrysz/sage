@@ -26,3 +26,11 @@ def update_session(session_id: str, data: dict) -> dict | None:
         return None
     sessions[session_id].update(data)
     return sessions[session_id]
+
+
+def delete_session(session_id: str) -> bool:
+    """Remove a session from the store. Returns True if it existed."""
+    if session_id in sessions:
+        del sessions[session_id]
+        return True
+    return False

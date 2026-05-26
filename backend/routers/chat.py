@@ -6,11 +6,12 @@ Handles the full onboarding state machine and streams responses via SSE.
 States handled here:
   ONBOARDING          → collect 4 profile fields one at a time
   AWAITING_CONFIRMATION → confirm or correct the collected profile
-  STUDY_MODE          → contextual RAG chat (stub, implemented in task 9)
+  STUDY_MODE          → contextual RAG chat with course-scoped retrieval
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 
@@ -24,8 +25,8 @@ from models.session import (
     Profile,
     SessionState,
 )
-from services import gemini_service
-from session_store import get_session, update_session
+from services import gemini_service, rag_service
+from session_store import get_session, update_session, delete_session
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,6 @@ async def chat_message(
             session, x_session_id, history, user_message, history_with_user
         )
     elif state == SessionState.STUDY_MODE:
-        # Stub for now 
         response_gen = _handle_study_mode(
             session, x_session_id, history, user_message, history_with_user
         )
@@ -341,16 +341,207 @@ async def _handle_study_mode(
     history_with_user: list[dict],
 ):
     """
-    Stub for STUDY_MODE
+    STUDY_MODE: contextual RAG chat.
+
+    Flow:
+    1. Classify the question via Gemini (educational vs. navigation/out-of-scope).
+    2. Educational → retrieve RAG chunks (course-scoped + global complement),
+       build a context-rich system prompt, stream Gemini answer, append source refs.
+    3. Out-of-scope → redirect to study plan topic.
+    4. Both RAG and Gemini fail → stream service_unavailable event and terminate session.
+    5. Only one fails → stream a soft error message.
     """
-    _persist_chat(session_id, history_with_user)
-    system = (
-        "Você é o Tutor CEFIS no modo de estudo. "
-        "Responda dúvidas sobre o conteúdo educacional do curso que o aluno está estudando. "
-        "Se a pergunta não for sobre conteúdo educacional, redirecione gentilmente."
-    )
-    async for chunk in gemini_service.chat_turn(history, system, user_message):
-        yield chunk
+    current_course_id: str | None = session.get("current_course_id")
+    study_plan = session.get("study_plan") or {}
+    plan_items = study_plan.get("items", []) if isinstance(study_plan, dict) else []
+    plan_topic = plan_items[0].get("title", "seu plano de estudos") if plan_items else "seu plano de estudos"
+
+    question_type = await _classify_study_question(user_message)
+
+    if question_type == "navigation":
+        _persist_chat(session_id, history_with_user)
+        redirect_msg = (
+            f"Posso ajudar com dúvidas sobre os tópicos do seu plano de estudos. "
+            f"Tem alguma dúvida sobre {plan_topic}?"
+        )
+        yield redirect_msg
+        return
+
+    rag_error: Exception | None = None
+    chunks: list = []
+
+    try:
+        # Primary: course-scoped query
+        if current_course_id:
+            chunks = await rag_service.query_rag(
+                query_text=user_message,
+                course_id=current_course_id,
+                top_k=5,
+                threshold=0.70,
+            )
+
+        # Complement with global index if fewer than 5 chunks
+        if len(chunks) < 5:
+            remaining = 5 - len(chunks)
+            global_chunks = await rag_service.query_rag(
+                query_text=user_message,
+                course_id=None,
+                top_k=remaining,
+                threshold=0.70,
+            )
+            # Avoid duplicates (by content)
+            existing_contents = {c.content for c in chunks}
+            for gc in global_chunks:
+                if gc.content not in existing_contents:
+                    chunks.append(gc)
+                    existing_contents.add(gc.content)
+                    if len(chunks) >= 5:
+                        break
+    except Exception as exc:
+        logger.error("_handle_study_mode: RAG retrieval failed — %s", exc)
+        rag_error = exc
+
+    # ── Step 3: build system prompt with RAG context ──────────────────────────
+    if chunks:
+        context_blocks = "\n\n".join(
+            f"[Trecho {i + 1}]\n{c.content}" for i, c in enumerate(chunks)
+        )
+        system_prompt = (
+            "Você é o Tutor CEFIS no modo de estudo. "
+            "Responda a dúvida do aluno com base nos trechos de transcrição abaixo. "
+            "Seja claro, didático e objetivo. "
+            "Se os trechos não forem suficientes, complemente com seu conhecimento geral.\n\n"
+            f"Trechos relevantes:\n{context_blocks}"
+        )
+    else:
+        system_prompt = (
+            "Você é o Tutor CEFIS no modo de estudo. "
+            "Responda a dúvida do aluno de forma clara e didática. "
+            "Use seu conhecimento geral sobre o tema."
+        )
+
+    # ── Step 4: generate answer via Gemini ───────────────────────────────────
+    gemini_error: Exception | None = None
+    full_response_parts: list[str] = []
+
+    try:
+        _persist_chat(session_id, history_with_user)
+        async for chunk in gemini_service.chat_turn(history_with_user, system_prompt, user_message):
+            full_response_parts.append(chunk)
+            yield chunk
+    except Exception as exc:
+        logger.error("_handle_study_mode: Gemini chat_turn failed — %s", exc)
+        gemini_error = exc
+
+    # ── Step 5: error handling ────────────────────────────────────────────────
+    if gemini_error is not None:
+        if rag_error is not None:
+            # Both failed → service unavailable, terminate session
+            logger.error(
+                "_handle_study_mode: both RAG and Gemini failed — terminating session %s",
+                session_id,
+            )
+            yield json.dumps({"service_unavailable": True})
+            delete_session(session_id)
+        else:
+            # Only Gemini failed
+            yield "Não foi possível processar sua dúvida no momento. Tente novamente."
+        return
+
+    if rag_error is not None and gemini_error is None:
+        # Only RAG failed — Gemini answered without context, that's acceptable
+        # (already streamed above); just log it
+        logger.warning(
+            "_handle_study_mode: RAG failed but Gemini answered without context — session %s",
+            session_id,
+        )
+
+    # ── Step 6: append source references ─────────────────────────────────────
+    if chunks and full_response_parts:
+        sources = _build_source_references(chunks)
+        if sources:
+            yield f"\n\n{sources}"
+
+
+async def _classify_study_question(user_message: str) -> str:
+    """
+    Use Gemini to classify a student question as 'educational' or 'navigation'.
+
+    Returns 'educational' for content/subject-matter questions and
+    'navigation' for requests about changing the plan, navigating the app,
+    or anything unrelated to educational content.
+
+    Defaults to 'educational' on any classification error.
+    """
+    classification_schema = {
+        "type": "object",
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": ["educational", "navigation"],
+            }
+        },
+        "required": ["type"],
+    }
+
+    from google.genai import types as gtypes
+
+    try:
+        response = await gemini_service._client.aio.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[{"role": "user", "parts": [{"text": user_message}]}],
+            config=gtypes.GenerateContentConfig(
+                system_instruction=(
+                    "Classify the student's message as either 'educational' or 'navigation'.\n"
+                    "'educational': questions about course content, concepts, topics, explanations, "
+                    "examples, or any subject-matter doubt.\n"
+                    "'navigation': requests to change the study plan, go back, navigate the app, "
+                    "adjust time, or anything unrelated to educational content.\n"
+                    "When in doubt, classify as 'educational'."
+                ),
+                response_mime_type="application/json",
+                response_schema=classification_schema,
+                temperature=0.0,
+            ),
+        )
+        import json as _json
+        data = _json.loads(response.text or "{}")
+        return data.get("type", "educational")
+    except Exception as exc:
+        logger.error("_classify_study_question failed: %s", exc)
+        return "educational"
+
+
+def _build_source_references(chunks: list) -> str:
+    """
+    Build a formatted source reference string from RAG chunks.
+
+    Only includes chunks that have both course_name and lesson_name.
+    Deduplicates by (course_name, lesson_name) pair.
+    Returns an empty string if no valid references exist.
+
+    Format: "Fonte: [Nome do Curso] — [Nome da Aula]"
+    """
+    seen: set[tuple[str, str]] = set()
+    refs: list[str] = []
+
+    for chunk in chunks:
+        course_name = getattr(chunk, "course_name", "") or ""
+        lesson_name = getattr(chunk, "lesson_name", "") or ""
+
+        if not course_name or not lesson_name:
+            continue
+
+        key = (course_name, lesson_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(f"Fonte: {course_name} — {lesson_name}")
+
+    if not refs:
+        return ""
+
+    return "\n".join(refs)
 
 
 def _next_missing_field(profile_data: dict) -> str | None:
