@@ -2,6 +2,6 @@ fastapi==0.115.5
 uvicorn[standard]==0.32.1
 pydantic-settings==2.6.1
 httpx==0.28.0
-google-generativeai==0.8.3
+google-genai>=2.6.0
 supabase==2.10.0
 python-dotenv==1.0.1

@@ -36,3 +36,16 @@ app.include_router(content.router, prefix="/content", tags=["content"])
 @app.get("/health", tags=["health"])
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/debug/session/{session_id}", tags=["debug"])
+async def debug_session(session_id: str) -> dict:
+    """Dev-only: inspect raw session state."""
+    from session_store import get_session
+    session = get_session(session_id)
+    if session is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Session not found")
+    # Omit the CEFIS api key from the response
+    safe = {k: v for k, v in session.items() if k != "cefis_api_key"}
+    return safe
