@@ -14,6 +14,7 @@ pgdata/
 # Transcripts / data volume (keep directory, ignore contents)
 data/*
 !data/.gitkeep
+data/Transcricoes/
 
 # Generated audio files
 *.mp3

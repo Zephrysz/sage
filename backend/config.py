@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     gemini_api_key: str
     supabase_url: str
     supabase_service_key: str
-    transcripts_path: str = "/data/transcripts.zip"
+    transcripts_path: str = "/data/Transcricoes/courses/output"
     port: int = 8000
     next_public_api_url: str = "http://localhost:8000"
     google_tts_key: str = ""
