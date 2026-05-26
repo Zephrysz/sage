@@ -46,6 +46,5 @@ async def debug_session(session_id: str) -> dict:
     if session is None:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Session not found")
-    # Omit the CEFIS api key from the response
     safe = {k: v for k, v in session.items() if k != "cefis_api_key"}
     return safe

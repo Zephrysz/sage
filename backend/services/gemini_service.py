@@ -1,13 +1,13 @@
 """
 Gemini service — chat, structured output, and embeddings.
 
-Uses the `google-genai` SDK (google.genai).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import AsyncGenerator
 
 from google import genai
@@ -98,7 +98,7 @@ async def extract_profile_field(
         "Respond only with valid JSON matching the provided schema."
     )
 
-    # Build contents list: system + history + current user message
+    #system + history + current user message
     contents = _build_contents(history, user_message)
 
     try:
@@ -192,11 +192,6 @@ async def embed(text: str) -> list[float]:
         raise RuntimeError(f"Embedding failed: {exc}") from exc
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
 def _build_contents(history: list[dict], user_message: str) -> list[dict]:
     """
     Build the contents list for the Gemini API.
@@ -211,3 +206,143 @@ def _build_contents(history: list[dict], user_message: str) -> list[dict]:
     ]
     contents.append({"role": "user", "parts": [{"text": user_message}]})
     return contents
+
+
+# MCQ generation for diagnosis
+
+_MCQ_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The question text.",
+                    },
+                    "options": {
+                        "type": "object",
+                        "properties": {
+                            "A": {"type": "string"},
+                            "B": {"type": "string"},
+                            "C": {"type": "string"},
+                            "D": {"type": "string"},
+                            "E": {"type": "string"},
+                        },
+                        "required": ["A", "B", "C", "D", "E"],
+                    },
+                    "correct_answer": {
+                        "type": "string",
+                        "enum": ["A", "B", "C", "D", "E"],
+                        "description": "The letter of the correct answer.",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "The topic or skill area this question tests.",
+                    },
+                },
+                "required": ["text", "options", "correct_answer", "topic"],
+            },
+        }
+    },
+    "required": ["questions"],
+}
+
+
+async def generate_mcq_questions(
+    goal: str,
+    level: str,
+    n: int = 5,
+) -> list:
+    """
+    Generate multiple-choice questions for the diagnosis phase.
+
+    Uses Gemini structured output to produce exactly `n` questions (3–5)
+    tailored to the student's goal and experience level. Each question has
+    5 options (A–E).
+
+    Args:
+        goal: The student's professional goal or area of interest.
+        level: Experience level string ('iniciante', 'intermediario', 'avancado').
+        n: Number of questions to generate (default 5, clamped to 3–5).
+
+    Returns:
+        A list of DiagnosisQuestion objects.
+        Returns an empty list on any Gemini error (fallback: classify as Iniciante).
+    """
+    from models.diagnosis import DiagnosisQuestion, DiagnosisOptions
+
+    n = max(3, min(5, n))
+
+    level_labels = {
+        "iniciante": "beginner",
+        "intermediario": "intermediate",
+        "avancado": "advanced",
+    }
+    level_en = level_labels.get(level, level)
+
+    system_prompt = (
+        "You are an expert educational assessment designer. "
+        "Generate multiple-choice questions to diagnose a student's knowledge gaps. "
+        "Each question must have exactly 5 options (A, B, C, D, E) with only one correct answer. "
+        "Questions should be clear, unambiguous, and appropriate for the student's level. "
+        "Cover different topics/skills relevant to the student's goal. "
+        "Respond only with valid JSON matching the provided schema."
+    )
+
+    user_prompt = (
+        f"Generate exactly {n} multiple-choice questions to diagnose knowledge gaps for a student with:\n"
+        f"- Professional goal: {goal}\n"
+        f"- Experience level: {level_en}\n\n"
+        f"Each question should test a different topic relevant to '{goal}'. "
+        f"Make questions practical and scenario-based when possible. "
+        f"Each question must have exactly 5 answer options (A, B, C, D, E)."
+    )
+
+    try:
+        response = await _client.aio.models.generate_content(
+            model=_CHAT_MODEL,
+            contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                response_mime_type="application/json",
+                response_schema=_MCQ_SCHEMA,
+                temperature=0.7,
+            ),
+        )
+        raw = response.text or ""
+        parsed = json.loads(raw)
+        raw_questions = parsed.get("questions", [])
+
+        if not raw_questions:
+            logger.warning("generate_mcq_questions: Gemini returned empty questions list")
+            return []
+
+        questions = []
+        for q in raw_questions:
+            opts = q.get("options", {})
+            try:
+                question = DiagnosisQuestion(
+                    id=uuid.uuid4(),
+                    text=q["text"],
+                    options=DiagnosisOptions(
+                        A=opts.get("A", ""),
+                        B=opts.get("B", ""),
+                        C=opts.get("C", ""),
+                        D=opts.get("D", ""),
+                        E=opts.get("E", ""),
+                    ),
+                    correct_answer=q["correct_answer"],
+                    topic=q["topic"],
+                )
+                questions.append(question)
+            except Exception as exc:
+                logger.warning("Skipping malformed question: %s — %s", q, exc)
+
+        return questions
+
+    except Exception as exc:
+        logger.error("generate_mcq_questions failed: %s", exc)
+        return []
