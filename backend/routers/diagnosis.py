@@ -105,12 +105,14 @@ async def diagnosis_start(
         raise HTTPException(status_code=404, detail="Session not found")
 
     profile = session.get("profile") or {}
+    area = profile.get("area", "")
     goal = profile.get("goal", "")
     level = profile.get("level", "iniciante")
 
     questions = await gemini_service.generate_mcq_questions(
         goal=goal,
         level=level,
+        area=area,
         n=5,
     )
 

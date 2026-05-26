@@ -36,12 +36,16 @@ router = APIRouter()
 class ChatMessageRequest(BaseModel):
     message: str
 
-_PROFILE_FIELDS_ORDER = ["goal", "level", "time_available", "learning_style"]
+_PROFILE_FIELDS_ORDER = ["area", "goal", "level", "time_available", "learning_style"]
 
 _FIELD_QUESTIONS = {
+    "area": (
+        "Em qual área você quer se desenvolver? "
+        "Seja específico para que o plano seja mais preciso."
+    ),
     "goal": (
-        "Qual é o seu objetivo profissional ou área de interesse que você quer desenvolver? "
-        "Por exemplo: 'quero me tornar analista de dados' ou 'preciso aprender sobre finanças pessoais'."
+        "Qual é o seu objetivo profissional nessa área? "
+        "O que você quer alcançar?"
     ),
     "level": (
         "Qual é o seu nível de experiência nessa área? "
@@ -58,6 +62,7 @@ _FIELD_QUESTIONS = {
 }
 
 _FIELD_LABELS = {
+    "area": "Área de interesse",
     "goal": "Objetivo profissional",
     "level": "Nível de experiência",
     "time_available": "Tempo disponível por sessão",
@@ -80,8 +85,11 @@ _STYLE_LABELS = {
 _ONBOARDING_SYSTEM = (
     "Você é o Tutor CEFIS, um assistente de aprendizado personalizado. "
     "Seu tom é amigável, encorajador e direto. "
-    "Você está coletando informações do aluno para montar um plano de estudos personalizado. "
-    "Faça apenas uma pergunta por vez. Seja conciso e natural."
+    "Você está coletando exatamente 5 informações do aluno para montar um plano de estudos. "
+    "REGRA CRÍTICA: Faça APENAS a pergunta indicada pelo sistema. "
+    "NÃO faça perguntas adicionais, NÃO peça esclarecimentos além do campo atual, "
+    "NÃO improvise perguntas fora das 5 definidas. "
+    "Seja conciso: uma frase de transição + a pergunta do campo atual."
 )
 
 _CONFIRMATION_SYSTEM = (
@@ -97,15 +105,18 @@ _CONFIRMATION_SYSTEM = (
 async def _sse_stream(text_gen):
     """Wrap an async generator of text chunks into SSE format."""
     async for chunk in text_gen:
-        escaped = chunk.replace("\n", "\\n")
-        yield f"data: {escaped}\n\n"
+        # Encode each line as a separate SSE data line to preserve newlines
+        for line in chunk.split("\n"):
+            yield f"data: {line}\n"
+        yield "\n"
     yield "data: [DONE]\n\n"
 
 
 async def _sse_static(text: str):
     """Yield a single static text as SSE."""
-    escaped = text.replace("\n", "\\n")
-    yield f"data: {escaped}\n\n"
+    for line in text.split("\n"):
+        yield f"data: {line}\n"
+    yield "\n"
     yield "data: [DONE]\n\n"
 
 
@@ -195,16 +206,36 @@ async def _handle_onboarding(
             async for chunk in gemini_service.chat_turn(
                 history_with_user,
                 _ONBOARDING_SYSTEM,
-                f"[SYSTEM: Field '{current_field}' was just collected. Now ask about '{next_field}': {question}]",
+                f"[SYSTEM: Field '{current_field}' collected successfully. Now ask ONLY about '{next_field}'. "
+                f"Base question: {question}. "
+                f"If the next field is 'goal', generate 2-3 short examples relevant to the area the user just mentioned — do NOT use generic or unrelated examples. "
+                f"Do NOT ask anything else.]",
             ):
                 yield chunk
     else:
         _persist_chat(session_id, history_with_user)
-        rephrased_prompt = (
-            f"[SYSTEM: The user's response did not clearly answer the question about '{current_field}'. "
-            f"Rephrase the question with a concrete example to help them understand what you need. "
-            f"Original question: {_FIELD_QUESTIONS[current_field]}]"
-        )
+        if current_field == "area":
+            rephrased_prompt = (
+                "[SYSTEM: The user's response was too vague — no specific subject area was identified. "
+                "Ask them to be more specific. Give 2-3 examples that feel relevant to what they mentioned "
+                "(e.g. if they mentioned work/career, suggest contabilidade, fiscal, trabalhista, gestão; "
+                "if they mentioned technology, suggest tecnologia, sistemas, automação fiscal). "
+                "Keep it conversational, one sentence.]"
+            )
+        elif current_field == "goal":
+            rephrased_prompt = (
+                "[SYSTEM: The user's response described a career aspiration but didn't mention "
+                "a specific professional goal. "
+                "Acknowledge their answer warmly, then ask: "
+                "'E qual é o seu objetivo profissional nessa área? "
+                "Por exemplo: ser promovido, passar em uma certificação, mudar de carreira...']"
+            )
+        else:
+            rephrased_prompt = (
+                f"[SYSTEM: The user's response did not clearly answer the question about '{current_field}'. "
+                f"Rephrase the question with a concrete example to help them understand what you need. "
+                f"Original question: {_FIELD_QUESTIONS[current_field]}. Do NOT ask anything else.]"
+            )
         async for chunk in gemini_service.chat_turn(
             history_with_user,
             _ONBOARDING_SYSTEM,
@@ -275,6 +306,7 @@ async def _handle_awaiting_confirmation(
     if intent == "confirm":
         try:
             profile = Profile(
+                area=profile_data["area"],
                 goal=profile_data["goal"],
                 level=ExperienceLevel(profile_data["level"]),
                 time_available=int(profile_data["time_available"]),
@@ -298,9 +330,12 @@ async def _handle_awaiting_confirmation(
         async for chunk in gemini_service.chat_turn(
             history_with_user,
             _CONFIRMATION_SYSTEM,
-            "[SYSTEM: The user confirmed their profile. Respond enthusiastically and say you will now start the knowledge diagnosis.]",
+            "[SYSTEM: The user confirmed their profile. Respond enthusiastically in 1-2 sentences saying you will now start the knowledge diagnosis. Be brief.]",
         ):
             yield chunk
+
+        # Signal state change to frontend
+        yield json.dumps({"state": SessionState.DIAGNOSIS.value})
 
     elif intent == "correct" and field_to_correct not in ("none", ""):
         _persist_chat(session_id, history_with_user)
@@ -545,19 +580,23 @@ def _build_source_references(chunks: list) -> str:
 
 
 def _next_missing_field(profile_data: dict) -> str | None:
-    """Return the next field in order that hasn't been collected yet."""
+    """Return the next field in order that hasn't been collected yet (None counts as missing)."""
     for field in _PROFILE_FIELDS_ORDER:
-        if field not in profile_data or profile_data[field] is None:
+        val = profile_data.get(field)
+        if val is None or val == "" or (isinstance(val, str) and val.strip() == ""):
             return field
     return None
 
 
 def _format_profile_summary(profile_data: dict) -> str:
-    level_label = _LEVEL_LABELS.get(str(profile_data.get("level", "")), profile_data.get("level", ""))
-    style_label = _STYLE_LABELS.get(str(profile_data.get("learning_style", "")), profile_data.get("learning_style", ""))
-    time_val = profile_data.get("time_available", "")
+    level_label = _LEVEL_LABELS.get(str(profile_data.get("level", "")), profile_data.get("level", "—"))
+    style_label = _STYLE_LABELS.get(str(profile_data.get("learning_style", "")), profile_data.get("learning_style", "—"))
+    time_val = profile_data.get("time_available", "—")
+    area_val = profile_data.get("area") or "—"
+    goal_val = profile_data.get("goal") or "—"
     return (
-        f"• Objetivo: {profile_data.get('goal', '')}\n"
+        f"• Área de interesse: {area_val}\n"
+        f"• Objetivo profissional: {goal_val}\n"
         f"• Nível: {level_label}\n"
         f"• Tempo disponível: {time_val} minutos por sessão\n"
         f"• Estilo de aprendizagem: {style_label}"

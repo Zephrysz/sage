@@ -23,12 +23,36 @@ _CHAT_MODEL = "gemini-2.5-flash"
 _EMBED_MODEL = "gemini-embedding-001"
 
 _PROFILE_FIELD_SCHEMAS: dict[str, dict] = {
+    "area": {
+        "type": "object",
+        "properties": {
+            "area": {
+                "type": "string",
+                "description": (
+                    "The specific subject area or domain the student wants to study. "
+                    "Must be a concrete topic related to accounting, tax, labor law, corporate education, "
+                    "or similar professional fields. "
+                    "Examples: 'contabilidade', 'fiscal/tributário', 'trabalhista', 'eSocial', 'SPED', "
+                    "'planejamento tributário', 'gestão empresarial', 'desenvolvimento pessoal', 'tecnologia'. "
+                    "If the message is too vague (e.g. 'quero aprender', 'crescer profissionalmente') "
+                    "without naming a specific domain, return null."
+                ),
+            }
+        },
+        "required": ["area"],
+    },
     "goal": {
         "type": "object",
         "properties": {
             "goal": {
                 "type": "string",
-                "description": "The student's professional goal or area of study interest.",
+                "description": (
+                    "The student's professional goal or career aspiration. "
+                    "Accept any career-related aspiration, vague or specific "
+                    "(e.g. 'ser promovido', 'passar no exame do CRC', 'dominar o eSocial', "
+                    "'abrir escritório contábil', 'liderar equipe'). "
+                    "Return null only if the message contains no career or professional intent."
+                ),
             }
         },
         "required": ["goal"],
@@ -254,23 +278,14 @@ _MCQ_SCHEMA = {
 async def generate_mcq_questions(
     goal: str,
     level: str,
+    area: str = "",
     n: int = 5,
 ) -> list:
     """
     Generate multiple-choice questions for the diagnosis phase.
 
     Uses Gemini structured output to produce exactly `n` questions (3–5)
-    tailored to the student's goal and experience level. Each question has
-    5 options (A–E).
-
-    Args:
-        goal: The student's professional goal or area of interest.
-        level: Experience level string ('iniciante', 'intermediario', 'avancado').
-        n: Number of questions to generate (default 5, clamped to 3–5).
-
-    Returns:
-        A list of DiagnosisQuestion objects.
-        Returns an empty list on any Gemini error (fallback: classify as Iniciante).
+    tailored to the student's area, goal and experience level.
     """
     from models.diagnosis import DiagnosisQuestion, DiagnosisOptions
 
@@ -288,15 +303,17 @@ async def generate_mcq_questions(
         "Generate multiple-choice questions to diagnose a student's knowledge gaps. "
         "Each question must have exactly 5 options (A, B, C, D, E) with only one correct answer. "
         "Questions should be clear, unambiguous, and appropriate for the student's level. "
-        "Cover different topics/skills relevant to the student's goal. "
+        "Cover different topics/skills relevant to the student's specific area and goal. "
         "Respond only with valid JSON matching the provided schema."
     )
 
+    area_context = f"- Specific area/domain: {area}\n" if area else ""
     user_prompt = (
         f"Generate exactly {n} multiple-choice questions to diagnose knowledge gaps for a student with:\n"
+        f"{area_context}"
         f"- Professional goal: {goal}\n"
         f"- Experience level: {level_en}\n\n"
-        f"Each question should test a different topic relevant to '{goal}'. "
+        f"Each question should test a different topic relevant to '{area or goal}'. "
         f"Make questions practical and scenario-based when possible. "
         f"Each question must have exactly 5 answer options (A, B, C, D, E)."
     )

@@ -25,6 +25,7 @@ class LearningStyle(str, Enum):
 
 
 class Profile(BaseModel):
+    area: str
     goal: str
     level: ExperienceLevel
     time_available: int # minutes

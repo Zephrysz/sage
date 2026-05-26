@@ -22,6 +22,7 @@ interface PlanItem {
   estimated_minutes: number;
   justification: string;
   course_id?: string;
+  course_details?: Record<string, unknown>;
   has_certificate: boolean;
 }
 
