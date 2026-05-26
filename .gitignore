@@ -1,0 +1,38 @@
+# Environment
+.env
+
+# Dependencies
+node_modules/
+
+# Build artifacts
+.next/
+dist/
+
+# Database data
+pgdata/
+
+# Transcripts / data volume (keep directory, ignore contents)
+data/*
+!data/.gitkeep
+
+# Generated audio files
+*.mp3
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+.kiro
