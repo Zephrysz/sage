@@ -39,19 +39,6 @@ async def generate_summary(
     rag_chunks: list[RagChunk] | None,
     metadata: dict,
 ) -> AsyncGenerator[str, None]:
-    """
-    Generate a 250–350 word summary for the given plan item.
-
-    Yields text chunks for SSE streaming.
-    Populates *metadata* dict with:
-      - rag_sourced (bool)
-      - sources (list[ContentSource])
-
-    Args:
-        plan_item: The study plan item being summarised.
-        rag_chunks: Relevant transcript chunks from RAG (may be empty/None).
-        metadata: Mutable dict that will be populated with rag_sourced and sources.
-    """
     chunks = rag_chunks or []
     rag_sourced = bool(chunks)
     sources = _extract_sources(chunks)
@@ -63,22 +50,29 @@ async def generate_summary(
         context_block = _build_rag_context(chunks)
         system_prompt = (
             "Você é um tutor educacional especializado. "
+            "Você SEMPRE escreve em português brasileiro, sem exceção. "
             "Use os trechos de transcrição fornecidos como base principal do conteúdo. "
-            "Escreva em português brasileiro, de forma clara e didática."
+            "REGRA CRÍTICA: Retorne APENAS o texto do resumo, sem introduções como 'Aqui está o resumo:', "
+            "'Claro!', 'Com base nos trechos fornecidos,' ou qualquer frase de abertura. "
+            "Comece diretamente com o conteúdo do resumo."
         )
         user_prompt = (
-            f"Com base nos trechos abaixo, escreva um resumo sobre o tópico '{plan_item.title}'. "
-            f"O resumo deve ter entre 250 e 350 palavras, ser coeso e cobrir os pontos principais do material.\n\n"
+            f"Escreva um resumo em português brasileiro sobre o tópico '{plan_item.title}'. "
+            f"O resumo deve ter entre 250 e 350 palavras, ser coeso e cobrir os pontos principais do material. "
+            f"Retorne apenas o texto do resumo, sem títulos, cabeçalhos ou frases introdutórias.\n\n"
             f"TRECHOS DE REFERÊNCIA:\n{context_block}"
         )
     else:
         system_prompt = (
             "Você é um tutor educacional especializado. "
-            "Escreva em português brasileiro, de forma clara e didática."
+            "Você SEMPRE escreve em português brasileiro, sem exceção. "
+            "REGRA CRÍTICA: Retorne APENAS o texto do resumo, sem introduções como 'Aqui está o resumo:', "
+            "'Claro!', ou qualquer frase de abertura. Comece diretamente com o conteúdo."
         )
         user_prompt = (
-            f"Escreva um resumo sobre o tópico '{plan_item.title}'. "
-            f"O resumo deve ter entre 250 e 350 palavras, ser coeso e cobrir os pontos principais do tema."
+            f"Escreva um resumo em português brasileiro sobre o tópico '{plan_item.title}'. "
+            f"O resumo deve ter entre 250 e 350 palavras, ser coeso e cobrir os pontos principais do tema. "
+            f"Retorne apenas o texto do resumo, sem títulos, cabeçalhos ou frases introdutórias."
         )
 
     async for chunk in gemini_service.chat_turn(
@@ -94,21 +88,6 @@ async def generate_apostila(
     rag_chunks: list[RagChunk] | None,
     metadata: dict,
 ) -> AsyncGenerator[str, None]:
-    """
-    Generate a structured 400–1200 word apostila for the given plan item.
-
-    Sections: introdução, conceitos principais, exemplos práticos, pontos de atenção.
-
-    Yields text chunks for SSE streaming.
-    Populates *metadata* dict with:
-      - rag_sourced (bool)
-      - sources (list[ContentSource])
-
-    Args:
-        plan_item: The study plan item being covered.
-        rag_chunks: Relevant transcript chunks from RAG (may be empty/None).
-        metadata: Mutable dict that will be populated with rag_sourced and sources.
-    """
     chunks = rag_chunks or []
     rag_sourced = bool(chunks)
     sources = _extract_sources(chunks)
@@ -120,32 +99,39 @@ async def generate_apostila(
         context_block = _build_rag_context(chunks)
         system_prompt = (
             "Você é um tutor educacional especializado em criar material didático estruturado. "
+            "Você SEMPRE escreve em português brasileiro, sem exceção. "
             "Use os trechos de transcrição fornecidos como base principal do conteúdo. "
-            "Escreva em português brasileiro, de forma clara, didática e bem organizada."
+            "REGRA CRÍTICA: Retorne APENAS o conteúdo da apostila em markdown, começando diretamente "
+            "com a primeira seção '## Introdução'. Nunca adicione frases como 'Aqui está a apostila:', "
+            "'Claro!', 'Com base nos trechos,' ou qualquer introdução antes do conteúdo."
         )
         user_prompt = (
-            f"Com base nos trechos abaixo, crie uma apostila completa sobre o tópico '{plan_item.title}'. "
+            f"Crie uma apostila completa em português brasileiro sobre o tópico '{plan_item.title}'. "
             f"A apostila deve ter entre 400 e 1200 palavras e conter exatamente as seguintes seções:\n\n"
             f"## Introdução\n"
             f"## Conceitos Principais\n"
             f"## Exemplos Práticos\n"
             f"## Pontos de Atenção\n\n"
-            f"Use markdown para formatar as seções. Seja didático e aprofundado.\n\n"
+            f"Use markdown para formatar as seções. Seja didático e aprofundado. "
+            f"Comece diretamente com '## Introdução'.\n\n"
             f"TRECHOS DE REFERÊNCIA:\n{context_block}"
         )
     else:
         system_prompt = (
             "Você é um tutor educacional especializado em criar material didático estruturado. "
-            "Escreva em português brasileiro, de forma clara, didática e bem organizada."
+            "Você SEMPRE escreve em português brasileiro, sem exceção. "
+            "REGRA CRÍTICA: Retorne APENAS o conteúdo da apostila em markdown, começando diretamente "
+            "com a primeira seção '## Introdução'. Nunca adicione frases introdutórias antes do conteúdo."
         )
         user_prompt = (
-            f"Crie uma apostila completa sobre o tópico '{plan_item.title}'. "
+            f"Crie uma apostila completa em português brasileiro sobre o tópico '{plan_item.title}'. "
             f"A apostila deve ter entre 400 e 1200 palavras e conter exatamente as seguintes seções:\n\n"
             f"## Introdução\n"
             f"## Conceitos Principais\n"
             f"## Exemplos Práticos\n"
             f"## Pontos de Atenção\n\n"
-            f"Use markdown para formatar as seções. Seja didático e aprofundado."
+            f"Use markdown para formatar as seções. Seja didático e aprofundado. "
+            f"Comece diretamente com '## Introdução'."
         )
 
     async for chunk in gemini_service.chat_turn(
@@ -188,22 +174,28 @@ async def generate_podcast_script(
         context_block = _build_rag_context(chunks)
         system_prompt = (
             "Você é um roteirista de podcasts educacionais. "
+            "Você SEMPRE escreve em português brasileiro, sem exceção. "
             "Crie roteiros envolventes, conversacionais e fáceis de ouvir. "
-            "Escreva em português brasileiro."
+            "REGRA CRÍTICA: Retorne APENAS o texto do roteiro que será narrado, sem nenhuma introdução "
+            "como 'Aqui está o roteiro:', 'Claro!', 'Com base nos trechos,' ou qualquer frase antes do conteúdo. "
+            "Sem indicações de cena, rubricas, títulos ou formatação markdown. Apenas o texto narrado."
         )
         user_prompt = (
-            f"Com base nos trechos abaixo, crie um roteiro de podcast sobre '{plan_item.title}'. "
+            f"Crie um roteiro de podcast em português brasileiro sobre '{plan_item.title}'. "
             f"{word_instruction} {base_instruction}\n\n"
             f"TRECHOS DE REFERÊNCIA:\n{context_block}"
         )
     else:
         system_prompt = (
             "Você é um roteirista de podcasts educacionais. "
+            "Você SEMPRE escreve em português brasileiro, sem exceção. "
             "Crie roteiros envolventes, conversacionais e fáceis de ouvir. "
-            "Escreva em português brasileiro."
+            "REGRA CRÍTICA: Retorne APENAS o texto do roteiro que será narrado, sem nenhuma introdução "
+            "como 'Aqui está o roteiro:', 'Claro!', ou qualquer frase antes do conteúdo. "
+            "Sem indicações de cena, rubricas, títulos ou formatação markdown. Apenas o texto narrado."
         )
         user_prompt = (
-            f"Crie um roteiro de podcast sobre '{plan_item.title}'. "
+            f"Crie um roteiro de podcast em português brasileiro sobre '{plan_item.title}'. "
             f"{word_instruction} {base_instruction}"
         )
 

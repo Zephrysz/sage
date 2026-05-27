@@ -43,7 +43,29 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
-@app.get("/debug/session/{session_id}", tags=["debug"])
+@app.get("/debug/tts-test", tags=["debug"])
+async def debug_tts_test() -> dict:
+    """Dev-only: test TTS connectivity and return diagnostic info."""
+    import httpx
+    from config import settings
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={settings.gemini_api_key}"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": "Say: teste"}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Achernar"}}},
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(url, json=payload)
+            data = resp.json()
+            if "error" in data:
+                return {"ok": False, "status": resp.status_code, "error": data["error"]}
+            part = data["candidates"][0]["content"]["parts"][0]["inlineData"]
+            return {"ok": True, "mime_type": part["mimeType"], "data_len": len(part["data"])}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 async def debug_session(session_id: str) -> dict:
     """Dev-only: inspect raw session state."""
     from session_store import get_session

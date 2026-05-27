@@ -86,6 +86,7 @@ _STYLE_LABELS = {
 _ONBOARDING_SYSTEM = (
     "Você é o Tutor CEFIS, um assistente de aprendizado personalizado. "
     "Seu tom é amigável, encorajador e direto. "
+    "Você SEMPRE responde em português brasileiro. "
     "Você está coletando exatamente 5 informações do aluno para montar um plano de estudos. "
     "REGRA CRÍTICA: Faça APENAS a pergunta indicada pelo sistema. "
     "NÃO faça perguntas adicionais, NÃO peça esclarecimentos além do campo atual, "
@@ -95,6 +96,7 @@ _ONBOARDING_SYSTEM = (
 
 _CONFIRMATION_SYSTEM = (
     "Você é o Tutor CEFIS. "
+    "Você SEMPRE responde em português brasileiro. "
     "Você acabou de coletar o perfil do aluno e está aguardando confirmação. "
     "Se o aluno confirmar, responda de forma entusiasmada que vai iniciar o diagnóstico. "
     "Se o aluno quiser corrigir algo, pergunte qual campo deseja corrigir e colete o novo valor. "
@@ -146,7 +148,9 @@ async def chat_message(
         response_gen = _handle_awaiting_confirmation(
             session, x_session_id, history, user_message, history_with_user
         )
-    elif state == SessionState.STUDY_MODE:
+    elif state in (SessionState.STUDY_MODE, SessionState.PLAN_READY):
+        # PLAN_READY also allows study chat — user may be viewing a summary/apostila
+        # from the plan page and asking questions about the content.
         response_gen = _handle_study_mode(
             session, x_session_id, history, user_message, history_with_user
         )
@@ -284,11 +288,11 @@ async def _handle_awaiting_confirmation(
             contents=[{"role": "user", "parts": [{"text": user_message}]}],
             config=gtypes.GenerateContentConfig(
                 system_instruction=(
-                    "Classify the user's intent regarding their profile confirmation. "
-                    "If they are confirming/agreeing, return intent='confirm'. "
-                    "If they want to correct a specific field, return intent='correct' and the field name. "
-                    "If unclear, return intent='unclear'. "
-                    "Field names: goal, level, time_available, learning_style."
+                    "Classifique a intenção do usuário em relação à confirmação do perfil. "
+                    "Se ele está confirmando/concordando, retorne intent='confirm'. "
+                    "Se quer corrigir um campo específico, retorne intent='correct' e o nome do campo. "
+                    "Se não está claro, retorne intent='unclear'. "
+                    "Nomes dos campos: goal, level, time_available, learning_style."
                 ),
                 response_mime_type="application/json",
                 response_schema=intent_schema,
@@ -452,17 +456,24 @@ async def _handle_study_mode(
         )
         system_prompt = (
             "Você é o Tutor CEFIS no modo de estudo. "
+            "Você SEMPRE responde em português brasileiro, independentemente do idioma da pergunta. "
             "Responda a dúvida do aluno com base nos trechos de transcrição abaixo. "
             "Seja claro, didático e objetivo. Responda em formato de texto corrido — "
             "NUNCA gere roteiros de áudio, podcasts ou scripts. "
+            "REGRA CRÍTICA: Vá direto ao ponto. Nunca comece com 'Claro!', 'Ótima pergunta!', "
+            "'Com base nos trechos fornecidos,' ou qualquer frase introdutória. "
+            "Comece diretamente com a resposta. "
             "Se os trechos não forem suficientes, complemente com seu conhecimento geral.\n\n"
             f"Trechos relevantes:\n{context_blocks}"
         )
     else:
         system_prompt = (
             "Você é o Tutor CEFIS no modo de estudo. "
+            "Você SEMPRE responde em português brasileiro, independentemente do idioma da pergunta. "
             "Responda a dúvida do aluno de forma clara e didática em texto corrido. "
             "NUNCA gere roteiros de áudio, podcasts ou scripts. "
+            "REGRA CRÍTICA: Vá direto ao ponto. Nunca comece com 'Claro!', 'Ótima pergunta!', "
+            "ou qualquer frase introdutória. Comece diretamente com a resposta. "
             "Use seu conhecimento geral sobre o tema."
         )
 
@@ -538,12 +549,12 @@ async def _classify_study_question(user_message: str) -> str:
             contents=[{"role": "user", "parts": [{"text": user_message}]}],
             config=gtypes.GenerateContentConfig(
                 system_instruction=(
-                    "Classify the student's message as either 'educational' or 'navigation'.\n"
-                    "'educational': questions about course content, concepts, topics, explanations, "
-                    "examples, or any subject-matter doubt.\n"
-                    "'navigation': requests to change the study plan, go back, navigate the app, "
-                    "adjust time, or anything unrelated to educational content.\n"
-                    "When in doubt, classify as 'educational'."
+                    "Classifique a mensagem do aluno como 'educational' ou 'navigation'.\n"
+                    "'educational': perguntas sobre conteúdo do curso, conceitos, tópicos, explicações, "
+                    "exemplos ou qualquer dúvida sobre o assunto estudado.\n"
+                    "'navigation': pedidos para mudar o plano de estudos, voltar, navegar no app, "
+                    "ajustar tempo ou qualquer coisa não relacionada ao conteúdo educacional.\n"
+                    "Em caso de dúvida, classifique como 'educational'."
                 ),
                 response_mime_type="application/json",
                 response_schema=classification_schema,

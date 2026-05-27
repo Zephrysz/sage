@@ -135,8 +135,8 @@ async def _filter_courses_with_gemini(
         }
 
         if not score_map:
-            logger.info("_filter_courses_with_gemini: Gemini returned no relevant courses, using all as fallback")
-            return [(c, 0.51) for c in courses]
+            logger.info("_filter_courses_with_gemini: Gemini returned no relevant courses for this goal")
+            return []
 
         # Match courses by id and sort by score
         scored: list[tuple[dict, float]] = []
@@ -153,11 +153,11 @@ async def _filter_courses_with_gemini(
                 course.get("title") or course.get("name"), score,
             )
 
-        return scored if scored else [(c, 0.51) for c in courses]
+        return scored
 
     except Exception as exc:
         logger.warning("_filter_courses_with_gemini: failed — %s", exc)
-        return [(c, 0.51) for c in courses]
+        return []
 
 
 def _rank_courses(
@@ -181,6 +181,7 @@ async def _generate_justification(
     gaps: list[Gap],
     goal: str,
     rag_score: float = 0.0,
+    no_cefis_match: bool = False,
 ) -> str:
     """
     Ask Gemini for a 1–2 sentence justification explaining why this item was
@@ -188,11 +189,20 @@ async def _generate_justification(
 
     If rag_score is 0 (no direct RAG match), the prompt instructs Gemini to
     be honest about the indirect relevance rather than hallucinating a connection.
+
+    If no_cefis_match is True, the prompt explicitly states that the CEFIS
+    catalog had no relevant courses for this goal.
     """
     gap_topics = ", ".join(g.topic for g in gaps) if gaps else "tópicos gerais"
     type_label = "Curso CEFIS" if item_type == PlanItemType.CEFIS_COURSE else "Conteúdo Gerado pela IA"
 
-    if rag_score > 0:
+    if no_cefis_match:
+        relevance_hint = (
+            f"O catálogo da CEFIS não possui cursos com conteúdo relevante para o objetivo do aluno. "
+            f"Por isso, este material foi gerado pela IA para suprir essa lacuna. "
+            f"Mencione isso de forma clara e positiva na justificativa."
+        )
+    elif rag_score > 0:
         relevance_hint = (
             f"Este curso foi identificado como diretamente relevante para o objetivo do aluno "
             f"com base no conteúdo das aulas indexadas."
@@ -350,6 +360,13 @@ async def build_plan(
         item_specs.append((item, gaps, score))
         position += 1
 
+    no_cefis_courses = len(item_specs) == 0 and len(courses) > 0
+    if no_cefis_courses:
+        logger.info(
+            "build_plan: CEFIS catalog has no courses relevant to goal='%s', filling plan with generated content only",
+            goal,
+        )
+
     remaining_slots = limit - len(item_specs)
     if remaining_slots > 0:
         content_gaps = gaps if gaps else [Gap(topic=goal, is_critical=False, wrong_count=0)]
@@ -379,6 +396,7 @@ async def build_plan(
                 gaps=item_gaps,
                 goal=goal,
                 rag_score=rag_score,
+                no_cefis_match=no_cefis_courses and item.type == PlanItemType.GENERATED_CONTENT,
             )
             for item, item_gaps, rag_score in item_specs
         ]

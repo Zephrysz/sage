@@ -17,7 +17,8 @@ services:
       target: production
       args:
         # NEXT_PUBLIC_API_URL is baked into the JS bundle at build time.
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        # Must be set explicitly here — env_file is not read during build.
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL must be set in the root .env file}
     ports:
       - "3000:3000"
     env_file: ./frontend/.env

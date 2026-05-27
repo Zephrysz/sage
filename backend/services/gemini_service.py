@@ -120,10 +120,10 @@ async def extract_profile_field(
         return None
 
     system_prompt = (
-        "You are a data extraction assistant. "
-        "Extract the requested profile field from the user's message. "
-        "If the message does not clearly provide the value, return null for the field. "
-        "Respond only with valid JSON matching the provided schema."
+        "Você é um assistente de extração de dados. "
+        "Extraia o campo de perfil solicitado da mensagem do usuário. "
+        "Se a mensagem não fornecer claramente o valor, retorne null para o campo. "
+        "Responda apenas com JSON válido seguindo o schema fornecido."
     )
 
     #system + history + current user message
@@ -303,23 +303,24 @@ async def generate_mcq_questions(
     level_en = level_labels.get(level, level)
 
     system_prompt = (
-        "You are an expert educational assessment designer. "
-        "Generate multiple-choice questions to diagnose a student's knowledge gaps. "
-        "Each question must have exactly 5 options (A, B, C, D, E) with only one correct answer. "
-        "Questions should be clear, unambiguous, and appropriate for the student's level. "
-        "Cover different topics/skills relevant to the student's specific area and goal. "
-        "Respond only with valid JSON matching the provided schema."
+        "Você é um especialista em avaliação educacional. "
+        "Gere questões de múltipla escolha em português brasileiro para diagnosticar lacunas de conhecimento do aluno. "
+        "Cada questão deve ter exatamente 5 opções (A, B, C, D, E) com apenas uma resposta correta. "
+        "As questões devem ser claras, sem ambiguidade e adequadas ao nível do aluno. "
+        "Cubra diferentes tópicos relevantes para a área e objetivo do aluno. "
+        "Responda apenas com JSON válido seguindo o schema fornecido."
     )
 
-    area_context = f"- Specific area/domain: {area}\n" if area else ""
+    area_context = f"- Área/domínio específico: {area}\n" if area else ""
     user_prompt = (
-        f"Generate exactly {n} multiple-choice questions to diagnose knowledge gaps for a student with:\n"
+        f"Gere exatamente {n} questões de múltipla escolha em português brasileiro "
+        f"para diagnosticar lacunas de conhecimento de um aluno com:\n"
         f"{area_context}"
-        f"- Professional goal: {goal}\n"
-        f"- Experience level: {level_en}\n\n"
-        f"Each question should test a different topic relevant to '{area or goal}'. "
-        f"Make questions practical and scenario-based when possible. "
-        f"Each question must have exactly 5 answer options (A, B, C, D, E)."
+        f"- Objetivo profissional: {goal}\n"
+        f"- Nível de experiência: {level}\n\n"
+        f"Cada questão deve testar um tópico diferente relevante para '{area or goal}'. "
+        f"Prefira questões práticas e baseadas em cenários reais quando possível. "
+        f"Cada questão deve ter exatamente 5 opções de resposta (A, B, C, D, E)."
     )
 
     try:
@@ -383,7 +384,31 @@ TTS_VOICES = [
     {"name": "Zephyr",   "description": "Breezy, conversational"},
 ]
 
-_TTS_URL = "https://texttospeech.googleapis.com/v1beta1/text:synthesize"
+_TTS_MODEL = "gemini-2.5-flash-preview-tts"
+_TTS_REST_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
+
+
+def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 24000, channels: int = 1, sample_width: int = 2) -> bytes:
+    """Wrap raw PCM bytes in a WAV container so browsers can play it."""
+    import struct
+    data_size = len(pcm_bytes)
+    header = struct.pack(
+        '<4sI4s4sIHHIIHH4sI',
+        b'RIFF',
+        36 + data_size,
+        b'WAVE',
+        b'fmt ',
+        16,           # chunk size
+        1,            # PCM format
+        channels,
+        sample_rate,
+        sample_rate * channels * sample_width,  # byte rate
+        channels * sample_width,                # block align
+        sample_width * 8,                       # bits per sample
+        b'data',
+        data_size,
+    )
+    return header + pcm_bytes
 
 
 async def synthesize_speech(
@@ -392,59 +417,77 @@ async def synthesize_speech(
     language_code: str = "pt-BR",
     speaking_rate: float = 1.0,
     pitch: float = 0.0,
-) -> bytes:
+) -> tuple[bytes, str]:
     """
-    Synthesize speech using Gemini 2.5 Flash TTS via the Google Cloud TTS v1beta1 API.
+    Synthesize speech using Gemini 2.5 Flash Preview TTS via the Gemini REST API.
 
-    Requires GOOGLE_TTS_KEY env var — a Google Cloud API key with the
-    Cloud Text-to-Speech API enabled.
-
-    Returns raw MP3 bytes.
+    Uses the existing GEMINI_API_KEY — no separate Cloud TTS key required.
+    Returns (audio_bytes, mime_type). Audio is WAV if the API returns PCM,
+    or the raw bytes with the reported mime type otherwise.
     """
     import base64
     import httpx
     from config import settings
 
-    api_key = settings.google_tts_key
-    if not api_key:
-        raise RuntimeError(
-            "GOOGLE_TTS_KEY is not configured. "
-            "Add GOOGLE_TTS_KEY=<your-cloud-api-key> to backend/.env."
-        )
+    api_key = settings.gemini_api_key
 
     payload = {
-        "audioConfig": {
-            "audioEncoding": "MP3",
-            "pitch": pitch,
-            "speakingRate": speaking_rate,
-        },
-        "input": {
-            "text": text,
-        },
-        "voice": {
-            "languageCode": language_code,
-            "modelName": "gemini-2.5-flash-tts",
-            "name": voice_name,
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": f"Say: {text}"}],
+            }
+        ],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {"voiceName": voice_name}
+                }
+            },
         },
     }
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
-                f"{_TTS_URL}?key={api_key}",
+                f"{_TTS_REST_URL}?key={api_key}",
                 json=payload,
             )
             if not resp.is_success:
                 body_text = resp.text[:500]
                 logger.error("TTS API error %d: %s", resp.status_code, body_text)
                 raise RuntimeError(f"TTS API returned {resp.status_code}: {body_text}")
+
             data = resp.json()
-            audio_b64 = data.get("audioContent", "")
+            try:
+                part = data["candidates"][0]["content"]["parts"][0]["inlineData"]
+                audio_b64: str = part["data"]
+                mime_type: str = part.get("mimeType", "audio/wav")
+            except (KeyError, IndexError) as exc:
+                raise RuntimeError(f"Unexpected TTS response structure: {exc}") from exc
+
             if not audio_b64:
-                raise RuntimeError("TTS response missing audioContent")
-            return base64.b64decode(audio_b64)
+                raise RuntimeError("TTS response missing audio data")
+
+            raw = base64.b64decode(audio_b64)
+
+            # API returns raw PCM (audio/L16) — wrap in WAV so browsers can play it
+            if mime_type.startswith("audio/L16") or mime_type.startswith("audio/pcm"):
+                # Parse sample rate from mime type e.g. "audio/L16;codec=pcm;rate=24000"
+                rate = 24000
+                for part_str in mime_type.split(";"):
+                    if part_str.strip().startswith("rate="):
+                        try:
+                            rate = int(part_str.strip().split("=")[1])
+                        except ValueError:
+                            pass
+                return _pcm_to_wav(raw, sample_rate=rate), "audio/wav"
+
+            return raw, mime_type
+
     except RuntimeError:
         raise
     except Exception as exc:
-        logger.error("synthesize_speech failed: %s", exc)
-        raise RuntimeError(f"TTS synthesis failed: {exc}") from exc
+        logger.error("synthesize_speech failed: %s — %s", type(exc).__name__, exc)
+        raise RuntimeError(f"TTS synthesis failed: {type(exc).__name__}: {exc}") from exc

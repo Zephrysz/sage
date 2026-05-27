@@ -245,7 +245,7 @@ async def synthesize_podcast(
     voice_name = body.voice_name or entry.get("voice_name", "Achernar")
 
     try:
-        mp3_bytes = await synthesize_speech(
+        audio_bytes, mime_type = await synthesize_speech(
             text=script_text,
             voice_name=voice_name,
             language_code="pt-BR",
@@ -254,11 +254,12 @@ async def synthesize_podcast(
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
+    ext = "wav" if mime_type == "audio/wav" else "mp3"
     return StreamingResponse(
-        iter([mp3_bytes]),
-        media_type="audio/mpeg",
+        iter([audio_bytes]),
+        media_type=mime_type,
         headers={
-            "Content-Disposition": f'attachment; filename="podcast_{body.plan_item_id}.mp3"',
-            "Content-Length": str(len(mp3_bytes)),
+            "Content-Disposition": f'attachment; filename="podcast_{body.plan_item_id}.{ext}"',
+            "Content-Length": str(len(audio_bytes)),
         },
     )

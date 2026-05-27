@@ -60,6 +60,7 @@ export default function ContentPage() {
   const [selectedVoice, setSelectedVoice] = useState('Achernar');
   const [speakingRate, setSpeakingRate] = useState(1.0);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [audioExt, setAudioExt] = useState<string>('wav');
   const [synthesizing, setSynthesizing] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -139,6 +140,9 @@ export default function ContentPage() {
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       setAudioUrl(url);
+      // Detect format from content-type for the download filename
+      const ct = res.headers.get('content-type') || '';
+      setAudioExt(ct.includes('wav') ? 'wav' : 'mp3');
     } catch {
       setError('Não foi possível sintetizar o áudio. Tente novamente.');
     } finally {
@@ -242,7 +246,7 @@ export default function ContentPage() {
             />
             <a
               href={audioUrl}
-              download={`podcast-${itemId}.mp3`}
+              download={`podcast-${itemId}.${audioExt}`}
               className="flex items-center justify-center w-8 h-8 rounded-lg border border-[hsl(var(--border))] text-[hsl(var(--muted-foreground))] hover:text-[hsl(var(--foreground))] hover:bg-[hsl(var(--muted))] transition-colors"
               title="Baixar MP3"
             >
