@@ -56,25 +56,90 @@ async def _fetch_courses(api_key: str, time_available: int) -> list[dict]:
         return []
 
 
-async def _fetch_rag_chunks(gaps: list[dict]) -> list[RagChunk]:
+async def _fetch_rag_chunks(gaps: list[dict], area: str = "", goal: str = "") -> list[RagChunk]:
     """
-    Query RAG for each gap topic and collect all returned chunks.
-    Individual failures are silently skipped (empty list returned for that gap).
+    Query RAG for each gap topic plus the student's area and goal.
+    This ensures relevant courses are found even when gaps are generic.
+    Individual failures are silently skipped.
     """
     all_chunks: list[RagChunk] = []
+    seen_contents: set[str] = set()
+
+    # Build query list: area + goal first (most specific), then gaps
+    queries: list[str] = []
+    if area:
+        queries.append(area)
+    if goal:
+        queries.append(goal)
     for gap in gaps:
         topic = gap.get("topic", "")
-        if not topic:
-            continue
+        if topic and topic not in queries:
+            queries.append(topic)
+
+    for query in queries:
         try:
-            chunks = await rag_service.query_rag(topic, course_id=None, top_k=5)
-            all_chunks.extend(chunks)
+            chunks = await rag_service.query_rag(query, course_id=None, top_k=5)
+            for chunk in chunks:
+                if chunk.content not in seen_contents:
+                    seen_contents.add(chunk.content)
+                    all_chunks.append(chunk)
         except Exception as exc:
-            logger.warning("_fetch_rag_chunks: RAG query failed for topic '%s' — %s", topic, exc)
+            logger.warning("_fetch_rag_chunks: RAG query failed for '%s' — %s", query, exc)
     return all_chunks
 
 
-async def _enrich_cefis_items(plan: StudyPlan, api_key: str) -> None:
+def _normalize_lesson(lesson: dict) -> dict:
+    """
+    Normalize a raw CEFIS lesson dict so the frontend can consume it directly.
+
+    - duration: convert from seconds to minutes
+    - stream_sources: extract link_secure strings from the objects array,
+      preferring HD quality, falling back to any available source
+    - url: keep the lesson URL for the "Assistir na CEFIS" fallback link
+    """
+    # Duration: API returns seconds
+    raw_duration = lesson.get("duration") or lesson.get("duration_seconds") or 0
+    try:
+        duration_secs = int(raw_duration)
+        duration_mins = max(1, duration_secs // 60) if duration_secs > 60 else max(1, duration_secs)
+    except (TypeError, ValueError):
+        duration_mins = 0
+
+    # stream_sources: list of {link_secure, quality, height, ...}
+    raw_sources = lesson.get("stream_sources") or []
+    stream_urls: list[str] = []
+    if isinstance(raw_sources, list):
+        # Sort: prefer hd > sd, higher height first
+        def _sort_key(s: dict) -> tuple:
+            quality = (s.get("quality") or "").lower()
+            height = s.get("height") or 0
+            try:
+                height = int(height)
+            except (TypeError, ValueError):
+                height = 0
+            quality_rank = 0 if quality == "hd" else 1
+            return (quality_rank, -height)
+
+        sorted_sources = sorted(
+            [s for s in raw_sources if isinstance(s, dict)],
+            key=_sort_key,
+        )
+        stream_urls = [
+            s["link_secure"]
+            for s in sorted_sources
+            if s.get("link_secure")
+        ]
+
+    return {
+        "id": lesson.get("id"),
+        "title": lesson.get("title") or lesson.get("name") or "",
+        "duration": duration_mins,
+        "url": lesson.get("url") or lesson.get("link") or "",
+        "stream_sources": stream_urls,
+    }
+
+
+async def _enrich_cefis_items(plan: StudyPlan, api_key: str, rag_chunks: list[RagChunk] = [], time_available: int = 60) -> None:
     """
     For each CEFIS_COURSE item in the plan, fetch course details and lessons
     from the CEFIS API and store them in course_details.
@@ -85,14 +150,59 @@ async def _enrich_cefis_items(plan: StudyPlan, api_key: str) -> None:
             continue
         try:
             detail = await cefis_service.get_course_detail(api_key, item.course_id)
-            lessons = await cefis_service.get_course_lessons(api_key, item.course_id)
+            lessons_raw = await cefis_service.get_course_lessons(api_key, item.course_id)
             merged: dict = {}
             if isinstance(detail, dict):
-                merged.update(detail)
-            if isinstance(lessons, list):
-                merged["lessons"] = lessons
-            elif isinstance(lessons, dict):
-                merged["lessons"] = lessons.get("data") or lessons.get("lessons") or []
+                # Unwrap common envelope patterns: {"data": {...}}, {"course": {...}}
+                inner = (
+                    detail.get("data")
+                    or detail.get("course")
+                    or detail.get("result")
+                )
+                if isinstance(inner, dict):
+                    merged.update(inner)
+                else:
+                    merged.update(detail)
+
+            # Normalize lessons list — unwrap envelope if needed
+            if isinstance(lessons_raw, dict):
+                raw_list = (
+                    lessons_raw.get("data")
+                    or lessons_raw.get("lessons")
+                    or lessons_raw.get("items")
+                    or []
+                )
+            elif isinstance(lessons_raw, list):
+                raw_list = lessons_raw
+            else:
+                raw_list = []
+
+            merged["lessons"] = [_normalize_lesson(l) for l in raw_list]
+
+            # Highlight relevant lessons when course is longer than session time
+            if item.estimated_minutes > time_available and rag_chunks:
+                rag_lesson_names = {
+                    c.lesson_name.lower().strip()
+                    for c in rag_chunks
+                    if c.course_name.lower().strip() in (merged.get("title") or "").lower()
+                }
+                if rag_lesson_names:
+                    item.highlighted_lessons = [
+                        l["title"] for l in merged["lessons"]
+                        if l.get("title", "").lower().strip() in rag_lesson_names
+                    ]
+                    logger.info(
+                        "_enrich_cefis_items: course_id=%s highlighted %d/%d lessons",
+                        item.course_id, len(item.highlighted_lessons), len(merged["lessons"]),
+                    )
+
+            logger.info(
+                "_enrich_cefis_items: course_id=%s title='%s' lessons=%d banner=%s",
+                item.course_id,
+                merged.get("title") or merged.get("name", "?"),
+                len(merged["lessons"]),
+                bool(merged.get("banner")),
+            )
             item.course_details = merged
         except (CefisAuthError, CefisServerError, CefisTimeoutError) as exc:
             logger.warning(
@@ -178,6 +288,7 @@ def _session_to_model(session: dict):
     if profile_data:
         try:
             profile = Profile(
+                area=profile_data.get("area", ""),
                 goal=profile_data["goal"],
                 level=ExperienceLevel(profile_data["level"]),
                 time_available=int(profile_data["time_available"]),
@@ -264,17 +375,19 @@ async def get_plan(
     time_available: int = int(profile_data.get("time_available", 60))
     diagnosis_data = session.get("diagnosis") or {}
     gaps: list[dict] = diagnosis_data.get("gaps") or []
+    area: str = profile_data.get("area", "")
+    goal: str = profile_data.get("goal", "")
 
     api_key = _get_api_key(session)
 
     courses = await _fetch_courses(api_key, time_available)
 
-    rag_chunks = await _fetch_rag_chunks(gaps)
+    rag_chunks = await _fetch_rag_chunks(gaps, area=area, goal=goal)
 
     session_model = _session_to_model(session)
     plan = await plan_service.build_plan(session_model, courses, rag_chunks)
 
-    await _enrich_cefis_items(plan, api_key)
+    await _enrich_cefis_items(plan, api_key, rag_chunks=rag_chunks, time_available=time_available)
 
     await _mark_certificates(plan, api_key)
 
@@ -316,11 +429,14 @@ async def adjust_plan(
 
     diagnosis_data = session.get("diagnosis") or {}
     gaps: list[dict] = diagnosis_data.get("gaps") or []
+    profile_data = session.get("profile") or {}
+    area: str = profile_data.get("area", "")
+    goal: str = profile_data.get("goal", "")
     api_key = _get_api_key(session)
 
     courses = await _fetch_courses(api_key, body.new_time_available)
 
-    rag_chunks = await _fetch_rag_chunks(gaps)
+    rag_chunks = await _fetch_rag_chunks(gaps, area=area, goal=goal)
 
     session_model = _session_to_model(session)
     try:
@@ -333,7 +449,7 @@ async def adjust_plan(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    await _enrich_cefis_items(plan, api_key)
+    await _enrich_cefis_items(plan, api_key, rag_chunks=rag_chunks, time_available=body.new_time_available)
     await _mark_certificates(plan, api_key)
 
     profile_data = dict(session.get("profile") or {})

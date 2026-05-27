@@ -5,22 +5,42 @@ services:
       target: production
     ports:
       - "8000:8000"
-    env_file: .env
-    command: uv run uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
+    env_file: ./backend/.env
+    environment:
+      # Override session store to a persistent volume path
+      SESSION_STORE_PATH: /data/sessions.json
+    volumes:
+      - sessions_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   frontend:
     build:
       context: ./frontend
       target: production
+      args:
+        # Bake the public API URL at build time (Next.js NEXT_PUBLIC_* vars)
+        # Set NEXT_PUBLIC_API_URL in backend/.env or override here
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports:
       - "3000:3000"
-    env_file: .env
+    env_file: ./backend/.env
+    restart: unless-stopped
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
   indexer:
     build: ./backend/indexer
-    env_file: .env
+    env_file: ./backend/.env
     restart: "no"
     volumes:
       - ./data:/data
+
+volumes:
+  sessions_data:

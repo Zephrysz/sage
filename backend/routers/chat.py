@@ -52,12 +52,12 @@ _FIELD_QUESTIONS = {
         "Você se considera iniciante, intermediário ou avançado?"
     ),
     "time_available": (
-        "Quantos minutos por dia você tem disponível para estudar? "
-        "Por exemplo: 15, 30, 60 minutos."
+        "Quantos minutos por sessão de estudo você tem disponível? "
+        "Por exemplo: 15, 30, 45, 60 minutos."
     ),
     "learning_style": (
         "Qual é o seu estilo de aprendizagem preferido? "
-        "Você prefere aprender por vídeo, leitura ou áudio?"
+        "Você prefere aprender por vídeo, leitura, áudio ou de forma cinestésica (prática, exercícios, fazer)?"
     ),
 }
 
@@ -79,6 +79,7 @@ _STYLE_LABELS = {
     "video": "Vídeo",
     "leitura": "Leitura",
     "audio": "Áudio",
+    "cinestetico": "Cinestésico",
 }
 
 
@@ -330,9 +331,17 @@ async def _handle_awaiting_confirmation(
         async for chunk in gemini_service.chat_turn(
             history_with_user,
             _CONFIRMATION_SYSTEM,
-            "[SYSTEM: The user confirmed their profile. Respond enthusiastically in 1-2 sentences saying you will now start the knowledge diagnosis. Be brief.]",
+            "[SYSTEM: The user confirmed their profile. Respond in 2-3 sentences: "
+            "first, confirm enthusiastically that the profile is saved; "
+            "then warn that a quick knowledge quiz (5 multiple-choice questions) is about to start "
+            "to identify their knowledge gaps and personalize the study plan. "
+            "Be warm and encouraging. Be brief.]",
         ):
             yield chunk
+
+        # Small delay so the user can read the message before the diagnosis UI appears
+        import asyncio as _asyncio
+        await _asyncio.sleep(5)
 
         # Signal state change to frontend
         yield json.dumps({"state": SessionState.DIAGNOSIS.value})
@@ -444,14 +453,16 @@ async def _handle_study_mode(
         system_prompt = (
             "Você é o Tutor CEFIS no modo de estudo. "
             "Responda a dúvida do aluno com base nos trechos de transcrição abaixo. "
-            "Seja claro, didático e objetivo. "
+            "Seja claro, didático e objetivo. Responda em formato de texto corrido — "
+            "NUNCA gere roteiros de áudio, podcasts ou scripts. "
             "Se os trechos não forem suficientes, complemente com seu conhecimento geral.\n\n"
             f"Trechos relevantes:\n{context_blocks}"
         )
     else:
         system_prompt = (
             "Você é o Tutor CEFIS no modo de estudo. "
-            "Responda a dúvida do aluno de forma clara e didática. "
+            "Responda a dúvida do aluno de forma clara e didática em texto corrido. "
+            "NUNCA gere roteiros de áudio, podcasts ou scripts. "
             "Use seu conhecimento geral sobre o tema."
         )
 
@@ -549,13 +560,11 @@ async def _classify_study_question(user_message: str) -> str:
 
 def _build_source_references(chunks: list) -> str:
     """
-    Build a formatted source reference string from RAG chunks.
+    Build formatted source reference strings from RAG chunks.
 
-    Only includes chunks that have both course_name and lesson_name.
+    Format: "Fonte: [Nome do Curso] — [Nome da Aula] [lesson_id:<id>]"
+    The lesson_id tag is parsed by the frontend to resolve the lesson URL.
     Deduplicates by (course_name, lesson_name) pair.
-    Returns an empty string if no valid references exist.
-
-    Format: "Fonte: [Nome do Curso] — [Nome da Aula]"
     """
     seen: set[tuple[str, str]] = set()
     refs: list[str] = []
@@ -563,6 +572,7 @@ def _build_source_references(chunks: list) -> str:
     for chunk in chunks:
         course_name = getattr(chunk, "course_name", "") or ""
         lesson_name = getattr(chunk, "lesson_name", "") or ""
+        lesson_id = getattr(chunk, "lesson_id", "") or ""
 
         if not course_name or not lesson_name:
             continue
@@ -571,7 +581,11 @@ def _build_source_references(chunks: list) -> str:
         if key in seen:
             continue
         seen.add(key)
-        refs.append(f"Fonte: {course_name} — {lesson_name}")
+
+        ref = f"Fonte: {course_name} — {lesson_name}"
+        if lesson_id:
+            ref += f" [lesson_id:{lesson_id}]"
+        refs.append(ref)
 
     if not refs:
         return ""

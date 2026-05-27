@@ -44,33 +44,134 @@ def _item_limit(time_available: int, has_critical_gaps: bool) -> int:
 
 
 _RELEVANCE_THRESHOLD = 0.50
+
+async def _filter_courses_with_gemini(
+    courses: list[dict],
+    rag_chunks: list[RagChunk],
+    goal: str,
+    area: str,
+    gaps: list[Gap],
+) -> list[tuple[dict, float]]:
+    """
+    Use Gemini to filter and rank the CEFIS course catalog based on:
+    - The student's goal, area, and diagnosed gaps
+    - RAG chunks that represent relevant content topics
+
+    Returns courses sorted by relevance score (0.0–1.0), filtered to those
+    Gemini considers relevant. Falls back to all courses if Gemini fails.
+    """
+    import json as _json
+    from google.genai import types as gtypes
+
+    if not courses:
+        return []
+
+    # Build context from RAG chunks
+    rag_context = ""
+    if rag_chunks:
+        rag_context = "Tópicos relevantes encontrados no índice de conteúdo:\n" + "\n".join(
+            f"- {c.course_name}: {c.lesson_name} (similaridade: {c.similarity:.2f})"
+            for c in rag_chunks[:10]
+        )
+
+    gap_topics = ", ".join(g.topic for g in gaps) if gaps else "nenhuma lacuna identificada"
+
+    course_list = "\n".join(
+        f"{i+1}. id={c.get('id')} title=\"{c.get('title') or c.get('name', '')}\""
+        for i, c in enumerate(courses)
+    )
+
+    prompt = (
+        f"Você é um especialista em educação profissional. "
+        f"Dado o perfil do aluno abaixo, avalie quais cursos do catálogo são relevantes.\n\n"
+        f"PERFIL DO ALUNO:\n"
+        f"- Área: {area}\n"
+        f"- Objetivo: {goal}\n"
+        f"- Lacunas identificadas: {gap_topics}\n\n"
+        f"{rag_context}\n\n"
+        f"CATÁLOGO DE CURSOS DISPONÍVEIS:\n{course_list}\n\n"
+        f"Retorne um JSON com a lista de cursos relevantes, ordenados do mais ao menos relevante. "
+        f"Para cada curso relevante, inclua o id e um score de 0.0 a 1.0. "
+        f"Inclua apenas cursos genuinamente relevantes para o objetivo do aluno. "
+        f"Se nenhum for relevante, retorne lista vazia."
+    )
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "relevant_courses": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "score": {"type": "number"},
+                    },
+                    "required": ["id", "score"],
+                },
+            }
+        },
+        "required": ["relevant_courses"],
+    }
+
+    try:
+        response = await _client.aio.models.generate_content(
+            model=_CHAT_MODEL,
+            contents=[{"role": "user", "parts": [{"text": prompt}]}],
+            config=gtypes.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=schema,
+                temperature=0.0,
+            ),
+        )
+        data = _json.loads(response.text or "{}")
+        relevant = data.get("relevant_courses", [])
+
+        # Build id→score map
+        score_map: dict[str, float] = {
+            str(r["id"]): float(r["score"])
+            for r in relevant
+            if "id" in r and "score" in r
+        }
+
+        if not score_map:
+            logger.info("_filter_courses_with_gemini: Gemini returned no relevant courses, using all as fallback")
+            return [(c, 0.51) for c in courses]
+
+        # Match courses by id and sort by score
+        scored: list[tuple[dict, float]] = []
+        for course in courses:
+            cid = str(course.get("id") or "")
+            if cid in score_map:
+                scored.append((course, score_map[cid]))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+        for course, score in scored:
+            logger.info(
+                "  gemini_ranked: title='%s' score=%.2f",
+                course.get("title") or course.get("name"), score,
+            )
+
+        return scored if scored else [(c, 0.51) for c in courses]
+
+    except Exception as exc:
+        logger.warning("_filter_courses_with_gemini: failed — %s", exc)
+        return [(c, 0.51) for c in courses]
+
+
 def _rank_courses(
     courses: list[dict],
     rag_chunks: list[RagChunk],
 ) -> list[tuple[dict, float]]:
-    """
-    Return courses to include in the plan.
-
-    The RAG chunks are already the result of a semantic search against the
-    student's gaps — they represent relevant topics, not specific courses.
-    So we don't try to match chunks back to courses by name.
-
-    Instead:
-    - If any chunk cleared the threshold (i.e., rag_chunks is non-empty,
-      since query_rag already filters by threshold), the topic is relevant
-      and all courses are candidates.
-    - Courses are returned as-is (preserving the CEFIS API order, which is
-      typically by relevance/popularity) paired with the best overall chunk
-      similarity as a shared score.
-    - If no chunks exist above the threshold, no courses are returned (Req 5.5).
-    """
-    if not rag_chunks:
+    """Kept for reference — main path now uses _filter_courses_with_gemini."""
+    if not courses:
         return []
-
+    if not rag_chunks:
+        return [(course, 0.51) for course in courses]
     best_score = max(chunk.similarity for chunk in rag_chunks)
     if best_score < _RELEVANCE_THRESHOLD:
         return []
-
     return [(course, best_score) for course in courses]
 
 
@@ -79,19 +180,36 @@ async def _generate_justification(
     item_type: PlanItemType,
     gaps: list[Gap],
     goal: str,
+    rag_score: float = 0.0,
 ) -> str:
     """
     Ask Gemini for a 1–2 sentence justification explaining why this item was
-    included in the study plan.  Falls back to a generic message on error.
+    included in the study plan. Falls back to a generic message on error.
+
+    If rag_score is 0 (no direct RAG match), the prompt instructs Gemini to
+    be honest about the indirect relevance rather than hallucinating a connection.
     """
     gap_topics = ", ".join(g.topic for g in gaps) if gaps else "tópicos gerais"
     type_label = "Curso CEFIS" if item_type == PlanItemType.CEFIS_COURSE else "Conteúdo Gerado pela IA"
+
+    if rag_score > 0:
+        relevance_hint = (
+            f"Este curso foi identificado como diretamente relevante para o objetivo do aluno "
+            f"com base no conteúdo das aulas indexadas."
+        )
+    else:
+        relevance_hint = (
+            f"Este curso foi incluído como complemento ao plano, pois o catálogo disponível "
+            f"não contém cursos com correspondência direta ao objetivo. "
+            f"Seja honesto sobre essa limitação na justificativa."
+        )
 
     prompt = (
         f"Você é um tutor de estudos. Explique em 1 a 2 frases curtas e diretas "
         f"por que o item '{item_title}' ({type_label}) foi incluído no plano de estudos "
         f"de um aluno cujo objetivo é '{goal}' e que tem lacunas em: {gap_topics}. "
-        f"Seja específico e motivador. Responda apenas com a justificativa, sem introdução."
+        f"{relevance_hint} "
+        f"Seja específico e honesto. Responda apenas com a justificativa, sem introdução."
     )
 
     try:
@@ -100,7 +218,6 @@ async def _generate_justification(
             contents=[{"role": "user", "parts": [{"text": prompt}]}],
             config=types.GenerateContentConfig(
                 temperature=0.5,
-                max_output_tokens=256,
             ),
         )
         text = (response.text or "").strip()
@@ -124,13 +241,17 @@ def _fallback_justification(item_title: str, gaps: list[Gap]) -> str:
 def _estimated_minutes_for_course(course: dict) -> int:
     """
     Extract estimated duration from a CEFIS course dict.
+    The CEFIS API always returns duration in seconds — always divide by 60.
     Falls back to 30 minutes if the field is absent or unparseable.
     """
-    for key in ("duration", "estimated_duration", "duration_minutes", "total_duration"):
+    for key in ("duration", "estimated_duration", "total_duration", "duration_minutes"):
         val = course.get(key)
         if val is not None:
             try:
-                return max(1, int(val))
+                seconds = int(val)
+                if seconds <= 0:
+                    continue
+                return max(1, seconds // 60)
             except (TypeError, ValueError):
                 pass
     return 30
@@ -181,15 +302,35 @@ async def build_plan(
     has_critical_gaps = any(g.is_critical for g in gaps)
     limit = _item_limit(time_available, has_critical_gaps)
 
-    ranked_courses = _rank_courses(courses, rag_chunks)
+    area: str = getattr(profile, "area", "") or ""
+
+    # Log RAG chunks for debugging
+    if rag_chunks:
+        logger.info(
+            "build_plan: %d RAG chunks available for course filtering",
+            len(rag_chunks),
+        )
+        for chunk in rag_chunks:
+            logger.info(
+                "  RAG chunk: course='%s' lesson='%s' similarity=%.3f",
+                chunk.course_name, chunk.lesson_name, chunk.similarity,
+            )
+
+    # Use Gemini to filter and rank courses using RAG context + student profile
+    ranked_courses = await _filter_courses_with_gemini(courses, rag_chunks, goal, area, gaps)
+
+    logger.info(
+        "build_plan: goal='%s' area='%s' time=%d limit=%d total_courses=%d ranked=%d gaps=%d",
+        goal, area, time_available, limit, len(courses), len(ranked_courses), len(gaps),
+    )
 
 
-    ItemSpec = tuple[PlanItem, list[Gap]]
+    ItemSpec = tuple[PlanItem, list[Gap], float]  # item, gaps, rag_score
     item_specs: list[ItemSpec] = []
     position = 1
 
     # CEFIS_COURSE items
-    for course, _score in ranked_courses:
+    for course, score in ranked_courses:
         if position > limit:
             break
         course_id = str(course.get("id") or course.get("slug") or "")
@@ -202,11 +343,11 @@ async def build_plan(
             type=PlanItemType.CEFIS_COURSE,
             title=title,
             estimated_minutes=estimated,
-            justification="",          # filled in below
+            justification="",
             course_id=course_id if course_id else None,
             course_details=course,
         )
-        item_specs.append((item, gaps))
+        item_specs.append((item, gaps, score))
         position += 1
 
     remaining_slots = limit - len(item_specs)
@@ -226,7 +367,7 @@ async def build_plan(
                 estimated_minutes=estimated,
                 justification="",
             )
-            item_specs.append((item, [gap]))
+            item_specs.append((item, [gap], 0.0))
             position += 1
             remaining_slots -= 1
 
@@ -237,13 +378,14 @@ async def build_plan(
                 item_type=item.type,
                 gaps=item_gaps,
                 goal=goal,
+                rag_score=rag_score,
             )
-            for item, item_gaps in item_specs
+            for item, item_gaps, rag_score in item_specs
         ]
     )
 
     plan_items: list[PlanItem] = []
-    for (item, _), justification in zip(item_specs, justifications):
+    for (item, _, __), justification in zip(item_specs, justifications):
         item.justification = justification
         plan_items.append(item)
 

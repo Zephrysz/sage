@@ -73,7 +73,11 @@ _PROFILE_FIELD_SCHEMAS: dict[str, dict] = {
         "properties": {
             "time_available": {
                 "type": "integer",
-                "description": "Minutes available per study session (positive integer).",
+                "description": (
+                    "Minutes available per study session. "
+                    "Extract the number directly (e.g. '30 minutos' = 30, '1 hora' = 60, '45 min' = 45). "
+                    "Must be a positive integer."
+                ),
             }
         },
         "required": ["time_available"],
@@ -83,8 +87,8 @@ _PROFILE_FIELD_SCHEMAS: dict[str, dict] = {
         "properties": {
             "learning_style": {
                 "type": "string",
-                "enum": ["video", "leitura", "audio"],
-                "description": "Preferred learning style: video, leitura, or audio.",
+                "enum": ["video", "leitura", "audio", "cinestetico"],
+                "description": "Preferred learning style: video, leitura, audio, or cinestetico (hands-on/practice).",
             }
         },
         "required": ["learning_style"],
@@ -139,7 +143,7 @@ async def extract_profile_field(
         raw = response.text or ""
         parsed = json.loads(raw)
         value = parsed.get(field_name)
-        if value is None or value == "":
+        if value is None or value == "" or value == "null":
             return None
         if field_name == "time_available":
             try:
@@ -363,3 +367,84 @@ async def generate_mcq_questions(
     except Exception as exc:
         logger.error("generate_mcq_questions failed: %s", exc)
         return []
+
+
+# ── TTS voices available via Gemini 2.5 Flash TTS ────────────────────────────
+
+TTS_VOICES = [
+    {"name": "Achernar", "description": "Warm, welcoming"},
+    {"name": "Aoede",    "description": "Smooth, storytelling"},
+    {"name": "Charon",   "description": "Deep, authoritative"},
+    {"name": "Fenrir",   "description": "Energetic, dynamic"},
+    {"name": "Kore",     "description": "Clear, professional"},
+    {"name": "Leda",     "description": "Gentle, calm"},
+    {"name": "Orus",     "description": "Confident, direct"},
+    {"name": "Puck",     "description": "Playful, expressive"},
+    {"name": "Zephyr",   "description": "Breezy, conversational"},
+]
+
+_TTS_URL = "https://texttospeech.googleapis.com/v1beta1/text:synthesize"
+
+
+async def synthesize_speech(
+    text: str,
+    voice_name: str = "Achernar",
+    language_code: str = "pt-BR",
+    speaking_rate: float = 1.0,
+    pitch: float = 0.0,
+) -> bytes:
+    """
+    Synthesize speech using Gemini 2.5 Flash TTS via the Google Cloud TTS v1beta1 API.
+
+    Requires GOOGLE_TTS_KEY env var — a Google Cloud API key with the
+    Cloud Text-to-Speech API enabled.
+
+    Returns raw MP3 bytes.
+    """
+    import base64
+    import httpx
+    from config import settings
+
+    api_key = settings.google_tts_key
+    if not api_key:
+        raise RuntimeError(
+            "GOOGLE_TTS_KEY is not configured. "
+            "Add GOOGLE_TTS_KEY=<your-cloud-api-key> to backend/.env."
+        )
+
+    payload = {
+        "audioConfig": {
+            "audioEncoding": "MP3",
+            "pitch": pitch,
+            "speakingRate": speaking_rate,
+        },
+        "input": {
+            "text": text,
+        },
+        "voice": {
+            "languageCode": language_code,
+            "modelName": "gemini-2.5-flash-tts",
+            "name": voice_name,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{_TTS_URL}?key={api_key}",
+                json=payload,
+            )
+            if not resp.is_success:
+                body_text = resp.text[:500]
+                logger.error("TTS API error %d: %s", resp.status_code, body_text)
+                raise RuntimeError(f"TTS API returned {resp.status_code}: {body_text}")
+            data = resp.json()
+            audio_b64 = data.get("audioContent", "")
+            if not audio_b64:
+                raise RuntimeError("TTS response missing audioContent")
+            return base64.b64decode(audio_b64)
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        logger.error("synthesize_speech failed: %s", exc)
+        raise RuntimeError(f"TTS synthesis failed: {exc}") from exc

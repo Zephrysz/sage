@@ -24,6 +24,7 @@ _supabase: Client = create_client(settings.supabase_url, settings.supabase_servi
 class RagChunk(BaseModel):
     course_name: str
     lesson_name: str
+    lesson_id: str = ""   # lesson_id from the transcript index
     content: str
     similarity: float
 
@@ -143,6 +144,7 @@ def _map_chunks(rows: list[dict]) -> list[RagChunk]:
                 RagChunk(
                     course_name=row["course_name"],
                     lesson_name=row["lesson_name"],
+                    lesson_id=str(row.get("lesson_id") or ""),
                     content=row["content"],
                     similarity=float(row["similarity"]),
                 )

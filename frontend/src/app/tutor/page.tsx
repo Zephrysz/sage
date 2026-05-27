@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { Send } from 'lucide-react';
 import { useSession } from '@/hooks/useSession';
 import { apiRequest } from '@/lib/api';
 import { StudyPlanList } from '@/components/plan/StudyPlanList';
@@ -46,6 +47,48 @@ async function* parseSSE(body: ReadableStream<Uint8Array>) {
   }
 }
 
+// ── User avatar ───────────────────────────────────────────────────────────────
+function UserAvatar({ name }: { name?: string }) {
+  if (name) {
+    const parts = name.trim().split(/\s+/);
+    const initials =
+      parts.length >= 2
+        ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+        : parts[0].slice(0, 2).toUpperCase();
+    return (
+      <div
+        className="shrink-0 w-7 h-7 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-bold flex items-center justify-center select-none"
+        aria-label={`Avatar de ${name}`}
+      >
+        {initials}
+      </div>
+    );
+  }
+  // Generic person icon
+  return (
+    <div
+      className="shrink-0 w-7 h-7 rounded-full bg-[hsl(var(--muted))] border border-[hsl(var(--border))] flex items-center justify-center"
+      aria-label="Usuário"
+    >
+      <svg viewBox="0 0 24 24" className="w-4 h-4 text-[hsl(var(--muted-foreground))]" fill="currentColor" aria-hidden="true">
+        <path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z" />
+      </svg>
+    </div>
+  );
+}
+
+// ── Tutor avatar ──────────────────────────────────────────────────────────────
+function TutorAvatar() {
+  return (
+    <div
+      className="shrink-0 w-7 h-7 rounded-full bg-[hsl(174_72%_42%/0.15)] border border-[hsl(174_72%_42%/0.4)] flex items-center justify-center"
+      aria-label="CEFIS AI Tutor"
+    >
+      <img src="/cefis-logo.svg" alt="" width={16} height={16} aria-hidden="true" />
+    </div>
+  );
+}
+
 // ── Markdown renderer ─────────────────────────────────────────────────────────
 function MarkdownContent({ content, isUser }: { content: string; isUser: boolean }) {
   return (
@@ -61,9 +104,9 @@ function MarkdownContent({ content, isUser }: { content: string; isUser: boolean
         code: ({ children, className }) => {
           const isBlock = className?.includes('language-');
           return isBlock ? (
-            <code className={`block rounded px-3 py-2 text-xs font-mono my-1 ${isUser ? 'bg-black/20' : 'bg-muted'}`}>{children}</code>
+            <code className={`block rounded px-3 py-2 text-xs font-mono my-1 ${isUser ? 'bg-black/20' : 'bg-[hsl(var(--muted))]'}`}>{children}</code>
           ) : (
-            <code className={`rounded px-1 py-0.5 text-xs font-mono ${isUser ? 'bg-black/20' : 'bg-muted'}`}>{children}</code>
+            <code className={`rounded px-1 py-0.5 text-xs font-mono ${isUser ? 'bg-black/20' : 'bg-[hsl(var(--muted))]'}`}>{children}</code>
           );
         },
         a: ({ href, children }) => (
@@ -104,7 +147,6 @@ function DiagnosisPhase({
           sessionId
         );
         if (data.fallback || data.questions.length === 0) {
-          // Fallback: classified as Iniciante, skip to result
           onComplete({ level: 'iniciante', score: 0, gaps: [] });
           return;
         }
@@ -183,9 +225,9 @@ function DiagnosisPhase({
   return (
     <div className="flex flex-col flex-1 overflow-hidden">
       {/* Progress bar */}
-      <div className="px-4 pt-4 pb-2">
-        <div className="flex items-center justify-between mb-1">
-          <span className="text-xs text-muted-foreground">Diagnóstico de conhecimento</span>
+      <div className="px-5 pt-4 pb-2">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-xs text-muted-foreground font-medium">Diagnóstico de conhecimento</span>
           <span className="text-xs text-muted-foreground">
             {Object.keys(answers).length}/{questions.length} respondidas
           </span>
@@ -199,7 +241,7 @@ function DiagnosisPhase({
       </div>
 
       {/* Questions */}
-      <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+      <div className="flex-1 overflow-y-auto px-5 py-3 space-y-4">
         {questions.map((q, i) => (
           <DiagnosisQuestion
             key={q.id}
@@ -235,9 +277,11 @@ function DiagnosisPhase({
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function TutorPage() {
   const router = useRouter();
-  const { sessionId, state, user, studyPlan, setState, setStudyPlan } = useSession();
+  const {
+    sessionId, state, user, studyPlan,
+    messages, setState, setStudyPlan, addMessage, updateLastMessage, setMessages, learningStyle,
+  } = useSession();
 
-  const [messages, setMessages] = useState<{ role: 'user' | 'tutor'; text: string }[]>([]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
@@ -258,15 +302,14 @@ export default function TutorPage() {
   }, [messages, isTyping]);
 
   useEffect(() => {
-    if (!sessionId || greetedRef.current) return;
+    if (!sessionId || greetedRef.current || messages.length > 0) return;
     greetedRef.current = true;
-    setMessages([{
+    addMessage({
       role: 'tutor',
       text: `Olá${user?.name ? `, **${user.name}**` : ''}! Sou o **CEFIS AI Tutor**. Vou te ajudar a montar um plano de estudos personalizado.\n\nPara começar, **em qual área você quer se desenvolver?**`,
-    }]);
-  }, [sessionId, user]);
+    });
+  }, [sessionId, user, messages.length, addMessage]);
 
-  // Fetch plan when PLAN_READY
   useEffect(() => {
     if (state !== 'PLAN_READY' || studyPlan || planLoading || !sessionId) return;
     setPlanLoading(true);
@@ -289,7 +332,7 @@ export default function TutorPage() {
 
     setInput('');
     setChatError(null);
-    setMessages((prev) => [...prev, { role: 'user', text }]);
+    addMessage({ role: 'user', text });
     setIsTyping(true);
 
     try {
@@ -303,7 +346,7 @@ export default function TutorPage() {
       if (!res.body) throw new Error('No response body');
 
       let accumulated = '';
-      setMessages((prev) => [...prev, { role: 'tutor', text: '' }]);
+      addMessage({ role: 'tutor', text: '' });
 
       for await (const data of parseSSE(res.body)) {
         if (data === '[DONE]') break;
@@ -322,23 +365,16 @@ export default function TutorPage() {
         }
 
         accumulated += data;
-        setMessages((prev) => {
-          const updated = [...prev];
-          updated[updated.length - 1] = { role: 'tutor', text: accumulated };
-          return updated;
-        });
+        updateLastMessage(accumulated);
       }
-
-      // After confirmation, backend transitions to DIAGNOSIS — re-read session state
-      // The state update comes via the session store on next render
     } catch {
       setChatError('Não foi possível processar sua mensagem. Tente novamente.');
-      setMessages((prev) => prev.slice(0, -1));
+      setMessages(messages.filter((_, i) => i < messages.length - 1));
     } finally {
       setIsTyping(false);
       inputRef.current?.focus();
     }
-  }, [input, isTyping, sessionId, setState, setStudyPlan, state]);
+  }, [input, isTyping, sessionId, setState, setStudyPlan, state, addMessage, updateLastMessage, setMessages, messages]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -346,29 +382,32 @@ export default function TutorPage() {
 
   const handleDiagnosisComplete = useCallback((result: DiagnosisResultData) => {
     setState('PLAN_READY');
-    setMessages((prev) => [
-      ...prev,
-      {
-        role: 'tutor',
-        text: `Diagnóstico concluído! Nível identificado: **${
-          result.level === 'iniciante' ? 'Iniciante' :
-          result.level === 'intermediario' ? 'Intermediário' : 'Avançado'
-        }** (${Math.round(result.score * 100)}% de acertos).\n\nEstou montando seu plano de estudos personalizado...`,
-      },
-    ]);
-  }, [setState]);
+    addMessage({
+      role: 'tutor',
+      text: `Diagnóstico concluído! Nível identificado: **${
+        result.level === 'iniciante' ? 'Iniciante' :
+        result.level === 'intermediario' ? 'Intermediário' : 'Avançado'
+      }** (${Math.round(result.score * 100)}% de acertos).\n\nEstou montando seu plano de estudos personalizado...`,
+    });
+  }, [setState, addMessage]);
+
+  const handleGenerateContent = useCallback(async (item: PlanItem, type: 'SUMMARY' | 'APOSTILA') => {
+    if (!sessionId) return;
+    router.push(`/tutor/content/${item.id}?type=${type}&title=${encodeURIComponent(item.title)}`);
+  }, [sessionId, router]);
 
   const handleGenerateSummary = useCallback((item: PlanItem) => {
-    if (!sessionId) return;
-    setGeneratingItemId(item.id);
-    setTimeout(() => setGeneratingItemId(null), 100);
-  }, [sessionId]);
+    handleGenerateContent(item, 'SUMMARY');
+  }, [handleGenerateContent]);
 
   const handleGenerateApostila = useCallback((item: PlanItem) => {
+    handleGenerateContent(item, 'APOSTILA');
+  }, [handleGenerateContent]);
+
+  const handleGeneratePodcast = useCallback((item: PlanItem) => {
     if (!sessionId) return;
-    setGeneratingItemId(item.id);
-    setTimeout(() => setGeneratingItemId(null), 100);
-  }, [sessionId]);
+    router.push(`/tutor/content/${item.id}?type=PODCAST&title=${encodeURIComponent(item.title)}`);
+  }, [sessionId, router]);
 
   const isPlanReady = state === 'PLAN_READY' || state === 'STUDY_MODE';
   const isDiagnosis = state === 'DIAGNOSIS';
@@ -377,22 +416,22 @@ export default function TutorPage() {
   if (!sessionId) return null;
 
   return (
-    <main className="flex h-screen overflow-hidden bg-background">
+    <main className="flex h-screen overflow-hidden bg-[hsl(var(--background))] bg-pink">
       {/* ── Left panel: chat OR diagnosis ────────────────────────────────────── */}
       <section
-        className={`flex flex-col ${isPlanReady ? 'w-full md:w-2/5' : 'w-full max-w-2xl mx-auto'} border-r border-border`}
+        className={`flex flex-col ${isPlanReady ? 'w-full md:w-2/5' : 'w-full max-w-2xl mx-auto'} border border-[hsl(var(--border))]`}
         aria-label={isDiagnosis ? 'Diagnóstico' : 'Chat com o tutor'}
       >
         {/* Header */}
-        <header className="flex items-center gap-3 border-b border-border px-4 py-3 bg-card shrink-0">
-          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary text-primary-foreground font-bold text-sm select-none">
-            AI
+        <header className="flex items-center gap-3 border-b border-[hsl(var(--border))] px-5 py-3.5 bg-[hsl(var(--card))] shrink-0">
+          <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[hsl(174_72%_42%/0.15)] border border-[hsl(174_72%_42%/0.4)] select-none">
+            <img src="/cefis-logo.svg" alt="CEFIS" width={20} height={20} />
           </div>
           <div>
-            <p className="font-semibold text-sm text-foreground">CEFIS AI Tutor</p>
-            {user?.name && <p className="text-xs text-muted-foreground">{user.name}</p>}
+            <p className="font-semibold text-sm text-[hsl(var(--foreground))]">CEFIS AI Tutor</p>
+            {user?.name && <p className="text-xs text-[hsl(var(--muted-foreground))]">{user.name}</p>}
           </div>
-          <span className="ml-auto text-xs text-muted-foreground bg-muted rounded-full px-2 py-0.5">
+          <span className="ml-auto text-xs text-[hsl(var(--muted-foreground))] bg-[hsl(var(--muted))] rounded-full px-2.5 py-0.5">
             {state === 'ONBOARDING' && 'Onboarding'}
             {state === 'AWAITING_CONFIRMATION' && 'Confirmação'}
             {state === 'DIAGNOSIS' && 'Diagnóstico'}
@@ -406,31 +445,38 @@ export default function TutorPage() {
           <DiagnosisPhase sessionId={sessionId} onComplete={handleDiagnosisComplete} />
         )}
 
-        {/* ── CHAT phase (onboarding + awaiting confirmation + plan ready chat) ── */}
+        {/* ── CHAT phase ── */}
         {!isDiagnosis && (
           <>
-            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+            <div className="flex-1 overflow-y-auto px-5 py-5 space-y-4">
               {messages.map((msg, i) => {
                 const isUser = msg.role === 'user';
                 return (
-                  <div key={i} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                  <div key={i} className={`flex items-end gap-2 ${isUser ? 'justify-end' : 'justify-start'}`}>
+                    {/* Tutor avatar on the left */}
+                    {!isUser && <TutorAvatar />}
+
+                    <div className={`max-w-[78%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                       isUser
-                        ? 'bg-primary text-primary-foreground rounded-br-sm'
-                        : 'bg-muted text-foreground rounded-bl-sm'
+                        ? 'bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] rounded-br-sm'
+                        : 'bg-[hsl(var(--card))] text-[hsl(var(--foreground))] rounded-bl-sm border border-[hsl(var(--border))] border-l-2 border-l-[hsl(var(--primary))] shadow-sm'
                     }`}>
                       <MarkdownContent content={msg.text} isUser={isUser} />
                     </div>
+
+                    {/* User avatar on the right */}
+                    {isUser && <UserAvatar name={user?.name} />}
                   </div>
                 );
               })}
 
               {isTyping && (
-                <div className="flex justify-start">
-                  <div className="bg-muted rounded-2xl rounded-bl-sm px-4 py-3 flex gap-1 items-center">
-                    <span className="h-2 w-2 rounded-full bg-muted-foreground animate-bounce [animation-delay:0ms]" />
-                    <span className="h-2 w-2 rounded-full bg-muted-foreground animate-bounce [animation-delay:150ms]" />
-                    <span className="h-2 w-2 rounded-full bg-muted-foreground animate-bounce [animation-delay:300ms]" />
+                <div className="flex items-end gap-2 justify-start">
+                  <TutorAvatar />
+                  <div className="bg-[hsl(var(--card))] border border-[hsl(var(--border))] border-l-2 border-l-[hsl(var(--primary))] rounded-2xl rounded-bl-sm px-4 py-3 flex gap-1 items-center shadow-sm">
+                    <span className="h-2 w-2 rounded-full bg-[hsl(var(--muted-foreground))] animate-bounce [animation-delay:0ms]" />
+                    <span className="h-2 w-2 rounded-full bg-[hsl(var(--muted-foreground))] animate-bounce [animation-delay:150ms]" />
+                    <span className="h-2 w-2 rounded-full bg-[hsl(var(--muted-foreground))] animate-bounce [animation-delay:300ms]" />
                   </div>
                 </div>
               )}
@@ -439,10 +485,10 @@ export default function TutorPage() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Input — only shown during chat states */}
+            {/* Input — pill style with integrated send button */}
             {isChatActive && (
-              <div className="border-t border-border bg-card px-4 py-3 shrink-0">
-                <div className="flex items-center gap-2">
+              <div className="border-t border-[hsl(var(--border))] bg-[hsl(var(--card))] px-5 py-4 shrink-0">
+                <div className="flex items-center gap-2 rounded-full border border-[hsl(var(--border))] bg-[hsl(var(--background))] px-4 py-2 focus-within:ring-2 focus-within:ring-[hsl(var(--ring))] transition-shadow">
                   <input
                     ref={inputRef}
                     type="text"
@@ -450,16 +496,16 @@ export default function TutorPage() {
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder="Digite sua mensagem..."
-                    disabled={isTyping}
-                    className="flex-1 rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    className="flex-1 bg-transparent text-sm text-[hsl(var(--foreground))] placeholder:text-[hsl(var(--muted-foreground))] focus:outline-none"
                     aria-label="Mensagem para o tutor"
                   />
                   <button
                     onClick={sendMessage}
                     disabled={isTyping || !input.trim()}
-                    className="shrink-0 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="shrink-0 flex items-center justify-center w-8 h-8 rounded-full bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] transition-all hover:opacity-90 hover:shadow-md hover:shadow-[hsl(174_72%_42%/0.3)] disabled:cursor-not-allowed disabled:opacity-40"
+                    aria-label="Enviar mensagem"
                   >
-                    Enviar
+                    <Send className="w-3.5 h-3.5" aria-hidden="true" />
                   </button>
                 </div>
               </div>
@@ -471,32 +517,41 @@ export default function TutorPage() {
       {/* ── Study Plan panel ─────────────────────────────────────────────────── */}
       {isPlanReady && (
         <section className="hidden md:flex flex-col flex-1 overflow-hidden" aria-label="Plano de estudos">
-          <header className="border-b border-border px-6 py-3 bg-card shrink-0">
-            <h2 className="font-semibold text-sm text-foreground">Plano de Estudos</h2>
+          <header className="border-b border-[hsl(var(--border))] px-6 py-3.5 shrink-0 bg-[hsl(var(--card))]">
+            <div className="flex items-center gap-2">
+              <div className="w-1 h-5 rounded-full bg-[hsl(var(--primary))]" aria-hidden="true" />
+              <h2 className="font-semibold text-sm text-[hsl(var(--foreground))]">Plano de Estudos</h2>
+            </div>
           </header>
-          <div className="flex-1 overflow-y-auto px-6 py-4">
+          <div className="flex-1 overflow-y-auto px-6 py-5">
             {planLoading && (
               <div className="flex flex-col gap-3">
-                {[1, 2, 3].map((n) => <div key={n} className="h-28 rounded-lg bg-muted animate-pulse" />)}
-                <p className="text-center text-xs text-muted-foreground mt-2">Montando seu plano de estudos...</p>
+                {[1, 2, 3].map((n) => <div key={n} className="h-28 rounded-xl bg-[hsl(var(--muted))] animate-pulse" />)}
+                <p className="text-center text-xs text-[hsl(var(--muted-foreground))] mt-2">Montando seu plano de estudos...</p>
               </div>
             )}
             {planError && !planLoading && (
-              <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+              <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
                 <p>{planError}</p>
-                <button
-                  onClick={() => { setPlanError(null); setStudyPlan(null as unknown as StudyPlan); }}
-                  className="mt-2 text-xs underline hover:no-underline"
-                >Tentar novamente</button>
+                <button onClick={() => { setPlanError(null); setStudyPlan(null as unknown as StudyPlan); }} className="mt-2 text-xs underline hover:no-underline">Tentar novamente</button>
               </div>
             )}
             {studyPlan && !planLoading && (
-              <StudyPlanList
-                plan={studyPlan}
-                onGenerateSummary={handleGenerateSummary}
-                onGenerateApostila={handleGenerateApostila}
-                generatingItemId={generatingItemId}
-              />
+              studyPlan.items.length === 0 ? (
+                <div className="rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--muted))]/40 p-6 text-center space-y-2">
+                  <p className="text-sm font-medium text-[hsl(var(--foreground))]">Nenhum curso encontrado no catálogo para seu perfil no momento.</p>
+                  <p className="text-xs text-[hsl(var(--muted-foreground))]">O catálogo da CEFIS pode não ter cursos relacionados ao seu objetivo atual.</p>
+                </div>
+              ) : (
+                <StudyPlanList
+                  plan={studyPlan}
+                  learningStyle={learningStyle}
+                  onGenerateSummary={handleGenerateSummary}
+                  onGenerateApostila={handleGenerateApostila}
+                  onGeneratePodcast={handleGeneratePodcast}
+                  generatingItemId={generatingItemId}
+                />
+              )
             )}
           </div>
         </section>
@@ -504,18 +559,27 @@ export default function TutorPage() {
 
       {/* ── Mobile plan drawer ───────────────────────────────────────────────── */}
       {isPlanReady && (
-        <div className="md:hidden fixed bottom-0 left-0 right-0 z-10 max-h-[40vh] overflow-y-auto border-t border-border bg-background px-4 py-3">
-          {planLoading && <p className="text-center text-xs text-muted-foreground py-2">Montando seu plano de estudos...</p>}
+        <div className="md:hidden fixed bottom-0 left-0 right-0 z-10 max-h-[40vh] overflow-y-auto border-t border-[hsl(var(--border))] bg-[hsl(var(--background))] px-4 py-3">
+          {planLoading && <p className="text-center text-xs text-[hsl(var(--muted-foreground))] py-2">Montando seu plano de estudos...</p>}
           {studyPlan && !planLoading && (
-            <StudyPlanList
-              plan={studyPlan}
-              onGenerateSummary={handleGenerateSummary}
-              onGenerateApostila={handleGenerateApostila}
-              generatingItemId={generatingItemId}
-            />
+            studyPlan.items.length === 0 ? (
+              <p className="text-center text-xs text-[hsl(var(--muted-foreground))] py-3">
+                Nenhum curso encontrado no catálogo para seu perfil no momento.
+              </p>
+            ) : (
+              <StudyPlanList
+                plan={studyPlan}
+                learningStyle={learningStyle}
+                onGenerateSummary={handleGenerateSummary}
+                onGenerateApostila={handleGenerateApostila}
+                onGeneratePodcast={handleGeneratePodcast}
+                generatingItemId={generatingItemId}
+              />
+            )
           )}
         </div>
       )}
+
     </main>
   );
 }

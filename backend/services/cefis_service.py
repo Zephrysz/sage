@@ -139,18 +139,15 @@ async def get_certificates(api_key: str) -> list:
 async def get_courses(api_key: str, quick_filter: bool = False) -> list:
     """
     GET https://api-v3.cefis.com.br/courses
-    Optional query param: ?filter=quick  (applied when quick_filter=True)
 
-    Returns the course catalogue. The quick_filter should be applied when
-    the student's available time is ≤ 60 minutes (Requirement 4.1).
+    Returns the course catalogue. The quick_filter parameter is accepted for
+    API compatibility but ignored — the CEFIS v3 API does not support
+    ?filter=quick and returns 400 when it is sent (Requirement 4.1).
     """
     url = f"{_V3_BASE}/courses"
-    params = {"filter": "quick"} if quick_filter else {}
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-            response = await client.get(
-                url, headers=_v3_headers(api_key), params=params
-            )
+            response = await client.get(url, headers=_v3_headers(api_key))
     except httpx.TimeoutException as exc:
         raise CefisTimeoutError(
             "Timeout while fetching courses from CEFIS v3"

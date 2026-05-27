@@ -154,3 +154,62 @@ async def generate_apostila(
         user_message=user_prompt,
     ):
         yield chunk
+
+
+async def generate_podcast_script(
+    plan_item: PlanItem,
+    rag_chunks: list[RagChunk] | None,
+    metadata: dict,
+    target_words: int = 390,
+) -> AsyncGenerator[str, None]:
+    """
+    Generate a podcast script scaled to target_words (~130 wpm).
+    """
+    chunks = rag_chunks or []
+    rag_sourced = bool(chunks)
+    sources = _extract_sources(chunks)
+
+    metadata["rag_sourced"] = rag_sourced
+    metadata["sources"] = sources
+
+    target_minutes = round(target_words / 130, 1)
+    word_instruction = (
+        f"O roteiro deve ter aproximadamente {target_words} palavras "
+        f"(~{target_minutes} minutos de áudio a 130 palavras por minuto)."
+    )
+
+    base_instruction = (
+        f"Tom: conversacional, didático, como se estivesse explicando para um amigo. "
+        f"Inclua uma introdução cativante, os pontos principais e uma conclusão motivadora. "
+        f"Escreva apenas o texto que será narrado, sem indicações de cena, rubricas ou formatação markdown."
+    )
+
+    if rag_sourced:
+        context_block = _build_rag_context(chunks)
+        system_prompt = (
+            "Você é um roteirista de podcasts educacionais. "
+            "Crie roteiros envolventes, conversacionais e fáceis de ouvir. "
+            "Escreva em português brasileiro."
+        )
+        user_prompt = (
+            f"Com base nos trechos abaixo, crie um roteiro de podcast sobre '{plan_item.title}'. "
+            f"{word_instruction} {base_instruction}\n\n"
+            f"TRECHOS DE REFERÊNCIA:\n{context_block}"
+        )
+    else:
+        system_prompt = (
+            "Você é um roteirista de podcasts educacionais. "
+            "Crie roteiros envolventes, conversacionais e fáceis de ouvir. "
+            "Escreva em português brasileiro."
+        )
+        user_prompt = (
+            f"Crie um roteiro de podcast sobre '{plan_item.title}'. "
+            f"{word_instruction} {base_instruction}"
+        )
+
+    async for chunk in gemini_service.chat_turn(
+        history=[],
+        system_prompt=system_prompt,
+        user_message=user_prompt,
+    ):
+        yield chunk

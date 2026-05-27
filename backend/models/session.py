@@ -22,6 +22,7 @@ class LearningStyle(str, Enum):
     VIDEO = "video"
     LEITURA = "leitura"
     AUDIO = "audio"
+    CINESTETICO = "cinestetico"
 
 
 class Profile(BaseModel):

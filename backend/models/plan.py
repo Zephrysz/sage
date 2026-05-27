@@ -18,6 +18,7 @@ class PlanItem(BaseModel):
     course_id: str | None = None
     course_details: dict | None = None
     has_certificate: bool = False
+    highlighted_lessons: list[str] = []  # lesson titles to highlight when course > session time
 
 
 class StudyPlan(BaseModel):
