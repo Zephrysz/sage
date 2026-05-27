@@ -7,7 +7,6 @@ services:
       - "8000:8000"
     env_file: ./backend/.env
     environment:
-      # Override session store to a persistent volume path
       SESSION_STORE_PATH: /data/sessions.json
     volumes:
       - sessions_data:/data
@@ -24,12 +23,13 @@ services:
       context: ./frontend
       target: production
       args:
-        # Bake the public API URL at build time (Next.js NEXT_PUBLIC_* vars)
-        # Set NEXT_PUBLIC_API_URL in backend/.env or override here
+        # NEXT_PUBLIC_API_URL is baked into the JS bundle at build time.
+        # Set it in frontend/.env to your public backend URL.
+        # e.g. https://api.yourdomain.com or http://your-server-ip:8000
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports:
       - "3000:3000"
-    env_file: ./backend/.env
+    env_file: ./frontend/.env
     restart: unless-stopped
     depends_on:
       backend:
